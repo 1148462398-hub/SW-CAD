@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+pnpm-lock.yaml
+package-lock.json
+
+# 出图产物（不要提交到仓库）
+out/
+*.bak
+*.dwg
+*.dxf
+*.SLDDRW
+*.SLDPRT
+*.pdf
+*.png
+*.jpg
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 编辑器
+.vscode/
+.idea/
