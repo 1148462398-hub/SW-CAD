@@ -1,0 +1,51 @@
+{
+  "name": "dsh-cad-draw",
+  "version": "0.5.1",
+  "description": "SolidWorks 模型自动出工程图：拖拽上传 → 套图框 → 标准三视图+剖视 → 按所选标注标准(GB/ISO/ASME)标尺寸/公差/粗糙度 → 导出 DXF/DWG，并可在侧边栏面板里操作",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client.js",
+    "dsh",
+    "scripts",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "solidworks",
+    "dwg",
+    "dxf",
+    "cad",
+    "engineering-drawing",
+    "gb"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh/cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1148462398-hub/SW-CAD.git"
+  },
+  "bugs": {
+    "url": "https://github.com/1148462398-hub/SW-CAD/issues"
+  },
+  "homepage": "https://github.com/1148462398-hub/SW-CAD#readme"
+}
