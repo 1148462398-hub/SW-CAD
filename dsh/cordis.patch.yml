@@ -1,0 +1,20 @@
+# dsh-cad-draw 挂载补丁
+# 说明：本 patch 随 bundle 一起被 loader 加载。
+# 留空 config 时插件按默认规则自动探测本机 SolidWorks / 图框模板。
+
+- insert:
+    - id: cad-draw
+      name: 'dsh-cad-draw'
+      config:
+        # SolidWorks 可执行文件（留空 = 自动探测）
+        # solidworksExe: 'F:\sw\SOLIDWORKS\SLDWORKS.exe'
+        # 工程图模板（留空 = 用 SolidWorks 自带 gb.drwdot）
+        # drawingTemplate: 'F:\sw\SOLIDWORKS\data\templates\gb.drwdot'
+        # 图纸格式/图框（留空 = 自动按图幅匹配 a4 - gb.slddrt 等）
+        # sheetFormat: 'C:\ProgramData\SOLIDWORKS\SOLIDWORKS 2020\lang\Chinese-Simplified\sheetformat\a4 - gb.slddrt'
+        # 默认图幅：A4 / A3 / A2 / A1 / A0
+        paperSize: 'A4'
+        # 是否横向
+        landscape: true
+        # 是否在出图后导出 DWG
+        exportDwg: true
