@@ -18,58 +18,29 @@ window.__ModuleLoader__.load({
 
     const PANEL_ID = 'dsh-cad-draw'
     /**
-     * 解析 API 的基地址。
+     * API 基地址。
      *
-     * ⚠ 踩过的坑（用户截图里的报错）：
-     *   桌面端页面来源是 `dsh-app://app/`，相对路径 '/dsh-cad-draw/api/probe'
-     *   会被解析成 `dsh-app://app/dsh-cad-draw/api/probe`，
-     *   而桌面协议不转发插件注册的 HTTP 路由 →
-     *     探测：net::ERR_UNEXPECTED
-     *     选文件：404 (Not Found)
-     *   表现就是「探测半天没结果」「浏览加不进去」。
+     * ⚠ 结论（查了 DSH 桌面端 protocol.handle 的源码）：
+     *   `dsh-app://app/*` 除前端资源外，**全部带鉴权 cookie 转发给宿主 HTTP**：
      *
-     * 所以这里按来源自动选：
-     *   http(s) 部署  → 同源（浏览器里打开 GUI 就是这种，最稳）
-     *   dsh-app://     → 试着从 __DSH_BOOT__ 里挖宿主的 127.0.0.1:端口
-     * 两者都不行时，日志里会明确告诉用户改用浏览器地址。
+     *     protocol.handle(SCHEME, (request) => {
+     *       if (url.hostname === 'app') {
+     *         if (...前端资源...) return serveWebDocument(...)
+     *         return forwardWebRequest(request, hostUrl, hostCookie)   // ★
+     *       }
+     *     })
+     *
+     *   所以**相对路径才是对的**，桌面端和浏览器都能用。
+     *
+     * ⚠ 不要改成 `http://127.0.0.1:<端口>`：
+     *   宿主 HTTP 要求鉴权（不带 cookie 直接访问返回 401），
+     *   绝对地址会绕过桌面端的 cookie 注入，实测报 ERR_FAILED。
+     *
+     * 之前出现的 net::ERR_UNEXPECTED / 404 是两个别的原因：
+     *   · 404  = 宿主还跑着旧 api.js，`/api/pick-file` 路由不存在 → 重启即可
+     *   · ERR_UNEXPECTED = 宿主正忙于 SolidWorks/AutoCAD（Node 事件循环被占）
      */
-    function findHostPort() {
-      try {
-        const boot = window.__DSH_BOOT__
-        if (!boot) return 0
-        const s = JSON.stringify(boot)
-        const m = s && s.match(/(?:127\.0\.0\.1|localhost):(\d{2,5})/)
-        return m ? Number(m[1]) : 0
-      } catch {
-        return 0
-      }
-    }
-
-    function resolveApi() {
-      const proto = String(window.location?.protocol || '')
-      if (proto === 'http:' || proto === 'https:') {
-        return { base: '/dsh-cad-draw', mode: 'same-origin', ok: true }
-      }
-      /* 桌面端：尝试宿主的 HTTP 端口 */
-      const port = findHostPort()
-      if (port) {
-        return {
-          base: `http://127.0.0.1:${port}/dsh-cad-draw`,
-          mode: 'desktop-http',
-          ok: true,
-          port
-        }
-      }
-      return {
-        base: '/dsh-cad-draw',
-        mode: 'desktop-unsupported',
-        ok: false,
-        hint: '桌面应用内的 dsh-app:// 协议不转发插件接口，请在浏览器里打开 http://127.0.0.1:<端口> 使用面板'
-      }
-    }
-
-    const API_INFO = resolveApi()
-    const API = API_INFO.base
+    const API = '/dsh-cad-draw'
 
     /* ---------------- 样式（只用主题 token） ---------------- */
     const styles = {
@@ -785,33 +756,6 @@ window.__ModuleLoader__.load({
             'SolidWorks 模型 → GB 工程图 → DXF / DWG')
         ),
         h('div', { style: styles.body },
-
-          /* 桌面端 dsh-app:// 调不通插件接口时，明确告诉用户换浏览器打开 */
-          API_INFO.ok
-            ? null
-            : h('div', {
-                style: {
-                  padding: '10px 12px', borderRadius: 7, marginBottom: 12,
-                  border: '1px solid #d9534f', background: 'rgba(217,83,79,0.12)',
-                  fontSize: 12, lineHeight: 1.7
-                }
-              },
-                h('b', null, '⚠ 当前是桌面应用内嵌页面，出图接口调不通'),
-                h('br'),
-                '桌面端来源是 ',
-                h('code', null, 'dsh-app://app/'),
-                '，它不转发插件注册的 HTTP 路由，',
-                '所以「探测路径」「浏览…」「开始出图」都会失败。',
-                h('br'),
-                '请复制下面地址，用浏览器打开后再用这个面板：',
-                h('br'),
-                h('code', {
-                  style: { userSelect: 'all', fontSize: 12.5, padding: '2px 6px',
-                           background: 'rgba(0,0,0,0.25)', borderRadius: 4 }
-                }, 'http://127.0.0.1:' + (API_INFO.port || '<端口>')),
-                h('br'),
-                '（端口就是你现在这个界面地址里的端口；浏览器里是同源请求，不用鉴权）'
-              ),
 
           /* 拖拽区 */
           h('div', {
