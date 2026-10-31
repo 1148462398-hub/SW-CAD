@@ -8,6 +8,39 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.11.2（当前）
+
+**换电脑可移植性：去掉写死的本机路径。**
+
+用户问：「换电脑安装这个插件，能直接一键按之前的方式出图吗」。
+查下来有 3 处路径写死在本机目录，换机器必然失效，已全部改成动态推导：
+
+| 位置 | 原来（写死） | 现在 |
+|---|---|---|
+| 工程图模板 | `F:\sw\SOLIDWORKS\data\templates\gb.drwdot` | `sw_install_root()` + 多个相对路径候选 |
+| 明细表模板 | `F:\sw\SOLIDWORKS\lang\chinese-simplified\bom-standard.sldbomtbt` | 同上（含 english 兜底） |
+| Python | 只试 `Python311` | 试 310/311/312 + 扫 `Programs\Python\Python3*` + PATH |
+
+`probe` 现在还会直接报告「新机器最容易缺的东西」：
+
+```json
+{
+  "python": "3.11.9",
+  "pythonPath": "C:\\Users\\xxx\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+  "pythonDepsOk": true,
+  "pythonDeps": { "win32com": true, "pythoncom": true, "comtypes": true, "win32api": true },
+  "bomTemplate": "F:\\sw\\SOLIDWORKS\\lang\\chinese-simplified\\bom-standard.sldbomtbt",
+  "drawingTemplate": "F:\\sw\\SOLIDWORKS\\data\\templates\\gb.drwdot"
+}
+```
+
+缺依赖时 `warnings` 会直接给出可复制的修复命令：
+
+```
+"<python路径>" -m pip install pywin32 comtypes
+```
+
+### v0.11.1
 ### v0.11.1（当前）
 
 **面板一键把指令发给 AI，全自动，不需要用户复制粘贴。**
