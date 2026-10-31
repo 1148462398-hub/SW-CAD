@@ -112,9 +112,63 @@ TOLERANCE_TYPES = {
     'min': 4, 'max': 5, 'fit': 6, 'fit_tolerance': 7,
 }
 
+# ───────────────── 换电脑也要能用：路径一律动态推导 ─────────────────
+#
+# 以前这里写死成
+#   DEFAULT_TEMPLATE = r'F:\sw\SOLIDWORKS\data\templates\gb.drwdot'
+#   BOM_TEMPLATE     = r'F:\sw\SOLIDWORKS\lang\chinese-simplified\bom-standard.sldbomtbt'
+# 换一台电脑（装到 C:\Program Files\SOLIDWORKS Corp\ 或别的盘）就全部失效：
+# 图纸模板找不到、明细表插不进。现在一律从 SLDWORKS.exe 的安装根目录推导。
+
+
+def sw_install_root(hint=None):
+    """从 SLDWORKS.exe 反推 SolidWorks 安装根目录。"""
+    try:
+        import apps
+        info = apps.probe_info(hint, None) or {}
+        exe = (info.get('solidworks') or {}).get('exe') or ''
+        if exe and os.path.isfile(exe):
+            return os.path.dirname(exe)
+    except Exception:
+        pass
+    return ''
+
+
+def resolve_sw_asset(rel_candidates, hint=None):
+    """在 SolidWorks 安装目录下按候选相对路径找第一个存在的文件。"""
+    root = sw_install_root(hint)
+    if root:
+        for rel in rel_candidates:
+            p = os.path.join(root, *rel.split('\\'))
+            if os.path.isfile(p):
+                return p
+    return ''
+
+
+def default_template(hint=None):
+    """GB 工程图模板（.drwdot）。找不到就回退到常见位置，再不行交给 SolidWorks 默认。"""
+    p = resolve_sw_asset([
+        r'data\templates\gb.drwdot',
+        r'lang\chinese-simplified\gb.drwdot',
+        r'templates\gb.drwdot',
+        r'data\templates\A3 - gb.drwdot',
+    ], hint)
+    return p or DEFAULT_TEMPLATE
+
+
+def bom_template(hint=None):
+    """装配图明细表模板（.sldbomtbt）。"""
+    p = resolve_sw_asset([
+        r'lang\chinese-simplified\bom-standard.sldbomtbt',
+        r'lang\chinese-simplified\bom.sldbomtbt',
+        r'lang\english\bom-standard.sldbomtbt',
+    ], hint)
+    return p or BOM_TEMPLATE
+
+
+# 兜底值（动态推导失败时才用；老机器仍然命中）
 DEFAULT_TEMPLATE = r'F:\sw\SOLIDWORKS\data\templates\gb.drwdot'
 SHEETFORMAT_DIR = r'C:\ProgramData\SOLIDWORKS\SOLIDWORKS 2020\lang\Chinese-Simplified\sheetformat'
-# 装配图明细表（BOM）的表格模板
 BOM_TEMPLATE = r'F:\sw\SOLIDWORKS\lang\chinese-simplified\bom-standard.sldbomtbt'
 
 NEUTRAL_EXTS = ('.step', '.stp', '.iges', '.igs', '.x_t', '.x_b', '.sat')
@@ -232,7 +286,7 @@ def insert_bom_table(dw, paper, landscape=True, template=None,
 
     GB 习惯：明细表放在标题栏正上方，从下往上排。
     """
-    tpl = template if (template and os.path.isfile(template)) else BOM_TEMPLATE
+    tpl = template if (template and os.path.isfile(template)) else bom_template()
     pw, ph = PAPER_SIZE_M.get(str(paper).upper(), (0.420, 0.297))
     if not landscape:
         pw, ph = ph, pw
@@ -2623,7 +2677,7 @@ def build(payload):
                         for k, v in layout.items() if not k.startswith('_')}})
 
     dw = make_drawing(sw,
-                      payload.get('template') or DEFAULT_TEMPLATE,
+                      payload.get('template') or default_template(payload.get('solidworksExe')),
                       paper, landscape, payload.get('sheetFormat'),
                       scale_num, scale_den)
     emit({'stage': 'drawing_created', 'paper': paper, 'landscape': landscape,
@@ -2689,7 +2743,7 @@ def build(payload):
     if is_assembly and payload.get('bom', True):
         try:
             bom_result = insert_bom_table(dw, paper, landscape,
-                                          payload.get('bomTemplate') or BOM_TEMPLATE,
+                                          payload.get('bomTemplate') or bom_template(payload.get('solidworksExe')),
                                           anchor=int(payload.get('bomAnchor', 3)),
                                           bom_type=int(payload.get('bomType', 1)))
             emit({'stage': 'bom', **bom_result})
@@ -3204,12 +3258,33 @@ def probe(payload):
                      '没找到 SLDWORKS.exe，请在面板里填启动路径'),
         }
 
-    tpl = payload.get('template') or DEFAULT_TEMPLATE
+    tpl = payload.get('template') or default_template(payload.get('solidworksExe'))
     info['template'] = {'path': tpl, 'exists': os.path.exists(tpl)}
     if os.path.isdir(SHEETFORMAT_DIR):
         info['sheetFormats'] = sorted(
             f for f in os.listdir(SHEETFORMAT_DIR) if f.lower().endswith('.slddrt'))
     info['python'] = sys.version.split()[0]
+    info['pythonPath'] = sys.executable
+    # 换电脑最容易缺的就是这两个 COM 库，直接在这里报出来，
+    # 免得用户等到出图时才看到 ImportError。
+    deps = {}
+    for mod in ('win32com', 'pythoncom', 'comtypes', 'win32api'):
+        try:
+            __import__(mod)
+            deps[mod] = True
+        except Exception as exc:
+            deps[mod] = False
+            deps.setdefault('missing', []).append(f'{mod}: {type(exc).__name__}')
+    info['pythonDeps'] = deps
+    info['pythonDepsOk'] = all(deps.get(m) for m in ('win32com', 'pythoncom'))
+    if not info['pythonDepsOk']:
+        info.setdefault('warnings', []).append(
+            '当前 Python 缺少 pywin32（win32com/pythoncom），请在命令行执行：'
+            f'"{sys.executable}" -m pip install pywin32 comtypes'
+        )
+    # 模板/明细表模板的真实解析结果（换电脑时这里是关键）
+    info['bomTemplate'] = bom_template(payload.get('solidworksExe'))
+    info['drawingTemplate'] = default_template(payload.get('solidworksExe'))
     return info
 
 
