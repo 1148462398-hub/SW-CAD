@@ -152,7 +152,7 @@ def connect(visible=True, exe_hint=None, log=None):
     """
     import win32com.client as win32
 
-    exe, source, msg = ensure_running(
+    exe, source, msg = apps.ensure_running(
         apps.SOLIDWORKS, exe_hint, log=log)
     if log:
         try:
@@ -1003,6 +1003,17 @@ def position_views_gb(doc, paper, landscape, title_h_m=0.055,
     for key, t in slots.items():
         tx, ty = targets[key]
         ok = False
+        # ⚠ 关键：Create1stAngleViews2 建的投影视图带**对齐约束**，
+        # 直接设 Position 之后 SolidWorks 会把非基准视图拉回对齐位置
+        # （实测基准视图移动成功，另外两个留在 y=-104 / x=430 的原地）。
+        # 必须先用 RemoveAlignment() 解除「长对正/高平齐」再设位置。
+        try:
+            t['view'].RemoveAlignment()
+        except Exception:
+            try:
+                t['view'].SetAlignment(0, False)
+            except Exception:
+                pass
         try:
             t['view'].Position = arr2(tx, ty)
             ok = True
@@ -2359,26 +2370,37 @@ def build(payload):
     # 所以：SolidWorks 只负责「报告每个视图的矩形边界」，
     # AutoCAD 收到边界后自己画框（保证进 DWG、可分图层），
     # 再用框把视图整块选中移到国标位置，最后删框。
-    # ── 第一步：在 SolidWorks 里把视图拉开、摆到国标位置 ──
+    # ── 第一步：把视图摆好 ──
     # 用户要求：「在 SolidWorks 上就要把各个视图分开，而且距离拉远点」
     # ⚠ IView.Position 必须传 VARIANT 数组，传 tuple 会让所有视图
     # 挤到同一个位置（实测三个视图全变成 (0,130)）。
+    #
+    # ⚠ 两种策略必须配套，否则视图会留在图框外（实测溢出 130mm）：
+    #   · spread_views_outside：故意摊到框外，等 AutoCAD 后处理再搬回框内
+    #   · position_views_gb   ：直接在 SolidWorks 里摆进框内
+    # 只要 AutoCAD 那步不跑，就不能用「摊到框外」。
+    acad_will_run = bool(payload.get('acadDimension', True)) and bool(out_dwg)
+    # 视图到底要不要让 AutoCAD 再搬一次？
+    #   · 摊到框外（spread_outside）→ 必须搬回框内，moveViews=True
+    #   · 已在 SolidWorks 里摆好（gb_layout）→ 再搬一次只会搬乱，moveViews=False
+    # 实测：gb_layout 已经把视图放对（(107.6,72.4) 等全在 A3 内），
+    # 但 AutoCAD 又按图层搬了一遍，结果两个视图压到标题栏上。
+    used_spread = False
     if payload.get('layoutViews', True):
         try:
-            # 默认把视图摊到图框**外面**，间隔至少 1.8 个视图宽。
-            # 用户要求：「拉的间距大胆一点，最起码拉到一个视图长度以上的间隔」，
-            # 而且可以就在图框外操作——摊开后每个视图周围是空白，
-            # GetOutline 边界不互相重叠，后续按层移动才干净。
-            if payload.get('spreadOutside', True):
+            if acad_will_run and payload.get('spreadOutside', True):
                 placed_views = spread_views_outside(
                     dw, paper, landscape,
                     gap_factor=float(payload.get('viewGapFactor', 1.8)))
+                used_spread = True
             else:
+                # 没有 AutoCAD 兜底时，直接在 SolidWorks 里摆进图框
                 placed_views = position_views_gb(
                     dw, paper, landscape,
                     gap_m=float(payload.get('viewGapMm', 60.0)) / 1000.0)
             if placed_views:
-                emit({'stage': 'views_positioned', 'placed': placed_views})
+                emit({'stage': 'views_positioned', 'placed': placed_views,
+                      'strategy': 'spread_outside' if used_spread else 'gb_layout'})
         except Exception as exc:
             emit({'stage': 'views_positioned', 'error': str(exc)})
 
@@ -2642,7 +2664,7 @@ def build(payload):
     acad_dim_result = None
     acad_result = None
     tb = payload.get('titleBlock') or {}
-    want_acad = payload.get('acadDimension', False)
+    want_acad = acad_will_run
     if out_dwg and saved.get('dwg') and (want_acad or tb):
         try:
             import acad_dimension
@@ -2656,6 +2678,9 @@ def build(payload):
             # 它据此画框 → 按框整块选中视图 → 移到国标位置 → 删框
             if view_boxes:
                 opts.setdefault('viewBoxes', view_boxes)
+            # 只有「已经把视图摊到框外」时才让 AutoCAD 搬回框内；
+            # 视图本来就在框内（gb_layout）就别再搬一次，否则会压到标题栏上。
+            opts.setdefault('moveViews', used_spread)
             if want_acad:
                 acad_dim_result = acad_dimension.dimension_dwg(
                     out_dwg, opts,
