@@ -58,6 +58,36 @@ window.__ModuleLoader__.load({
         color: 'var(--dsw-alias-text-danger, #c0392b)',
         wordBreak: 'break-all'
       },
+      /* 出图进度条 */
+      progressWrap: { marginTop: 12 },
+      progressHead: {
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        fontSize: 12,
+        marginBottom: 5
+      },
+      progressTrack: {
+        height: 7,
+        borderRadius: 4,
+        overflow: 'hidden',
+        background: 'var(--dsw-alias-bg-secondary, #ececec)'
+      },
+      progressFill: (percent, failed) => ({
+        height: '100%',
+        width: Math.max(0, Math.min(100, Number(percent) || 0)) + '%',
+        borderRadius: 4,
+        transition: 'width .35s ease',
+        background: failed
+          ? '#c0392b'
+          : 'linear-gradient(90deg, #1f6fb2, #38a3e0)'
+      }),
+      progressStage: {
+        fontSize: 11,
+        marginTop: 4,
+        opacity: 0.65,
+        fontFamily: 'ui-monospace, Consolas, monospace'
+      },
       drop: (over) => ({
         border: '2px dashed ' + (over
           ? 'var(--dsw-alias-brand-primary, #247bbf)'
@@ -262,6 +292,8 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false)
       const [pdfBusy, setPdfBusy] = useState(false)
       const [probeBusy, setProbeBusy] = useState(false)
+      // 出图进度：{active, percent, label, stage, error}
+      const [progress, setProgress] = useState(null)
       // 自动探测到的启动路径（打开面板就跑一次，直接显示在输入框下面）
       const [detected, setDetected] = useState({
         solidworks: null, autocad: null, python: '', revision: '', error: ''
@@ -316,6 +348,17 @@ window.__ModuleLoader__.load({
         if (!file) return
         setBusy(true)
         setResult(null)
+        setProgress({ active: true, percent: 0, label: '准备任务', stage: 'start' })
+        /* /api/build 跑完才返回，中途状态靠轮询 /api/progress 拿 */
+        const poller = setInterval(async () => {
+          try {
+            const r = await fetch(API + '/api/progress')
+            const j = await r.json()
+            if (j?.progress) setProgress(j.progress)
+          } catch {
+            /* 忽略轮询失败 */
+          }
+        }, 800)
         try {
           /* 浏览器里 File 对象没有本地路径（file.path 只有 Electron 才有），
              必须先把字节传到后端落盘，拿到绝对路径再出图。
@@ -402,10 +445,18 @@ window.__ModuleLoader__.load({
         } catch (error) {
           setLog('出图失败：' + (error?.message || String(error)))
         } finally {
+          clearInterval(poller)
+          // 最后再同步一次，确保进度条停在真实状态（成功 100% / 失败停在出错阶段）
+          try {
+            const r = await fetch(API + '/api/progress')
+            const j = await r.json()
+            if (j?.progress) setProgress(j.progress)
+          } catch {
+            /* 忽略 */
+          }
           setBusy(false)
         }
       }, [file, form])
-
       /* 检测启动路径：按当前填的路径探测，显示实际找到的 exe 和是否在运行。
          detectOnly=true 时（打开面板自动跑一次）不写日志、不覆盖用户正在看的输出，
          只更新 detected 状态把结果展示在输入框下面。 */
@@ -849,6 +900,27 @@ window.__ModuleLoader__.load({
               disabled: busy || pdfBusy,
               onClick: () => { setLog(''); setResult(null); setPdfPath('') }
             }, '清空日志')
+          ),
+
+          /* 进度条：按引擎阶段推进，跑完 100%，失败停在出错那一步 */
+          (progress || busy) && h('div', { style: styles.progressWrap },
+            h('div', { style: styles.progressHead },
+              h('span', null,
+                progress?.error
+                  ? '✗ 出图失败'
+                  : (progress?.percent >= 100 ? '✓ 出图完成' : (progress?.label || '准备中'))),
+              h('span', { style: { fontWeight: 600 } },
+                `${Math.round(progress?.percent ?? 0)}%`)
+            ),
+            h('div', { style: styles.progressTrack },
+              h('div', {
+                style: styles.progressFill(
+                  progress?.percent ?? 0,
+                  Boolean(progress?.error))
+              })
+            ),
+            progress?.stage && h('div', { style: styles.progressStage },
+              `阶段：${progress.stage}`)
           ),
 
           /* 结果 */
