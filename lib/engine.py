@@ -2656,6 +2656,16 @@ def build(payload):
     saved = save_and_export(dw, out_drw, out_dxf, out_dwg)
     emit({'stage': 'saved', **saved})
 
+    # 用完就关：模型零件在导出后就没用了（后续预览用工程图 dw，不用零件）。
+    # 不关会一直堆在 SolidWorks 里，文档一多 InsertModelAnnotations3 会认错图纸。
+    if payload.get('closeModelAfter', True):
+        try:
+            if doc_model is not None:
+                sw.CloseDoc(doc_model.GetTitle)
+                emit({'stage': 'model_closed', 'title': str(doc_model.GetTitle)})
+        except Exception as exc:
+            emit({'stage': 'model_closed', 'error': str(exc)})
+
     # ===== 第二步：在 AutoCAD 里做标注（新路线，比 SolidWorks 自动标注可控）=====
     # 理由：SolidWorks 的 InsertModelAnnotations3 只能插模型里本来就有的草图尺寸，
     # 导入实体一个都插不出；而且位置/样式由模板决定，不好精细控制。
@@ -2698,6 +2708,20 @@ def build(payload):
         except Exception as exc:
             emit({'stage': 'acad_post_error', 'error': str(exc),
                   'type': type(exc).__name__})
+
+        # 用完就关：AutoCAD 里这个 DWG 已经不需要了，留着只是占内存。
+        # 用户要求「打开过的界面如果后续用不上了，就顺带关掉」。
+        # 只关本文档，不动 AutoCAD 进程，也不碰用户自己开的图。
+        if payload.get('closeAcadAfter', True):
+            try:
+                from acad_plot import close_document
+                ok_close, msg = close_document(
+                    out_dwg, exe_hint=payload.get('autocadExe'))
+                emit({'stage': 'acad_closed', 'closed': bool(ok_close),
+                      'note': msg})
+            except Exception as exc:
+                emit({'stage': 'acad_closed', 'closed': False,
+                      'note': f'{type(exc).__name__}: {exc}'})
 
     preview = None
     if payload.get('preview', True):
