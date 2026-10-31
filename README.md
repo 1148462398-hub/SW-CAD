@@ -8,6 +8,49 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.10.0（当前）
+
+**面板接口「一直挂着不返回」的最终根因：`ctx.inject` 被包在 `ctx.effect` 里调用。**
+
+```js
+ctx.effect(() => registerCadApi(ctx, { log }))    // ❌ 错
+```
+
+`registerCadApi` 内部要调 `ctx.inject(['webServer'], ...)`，
+而 `ctx.inject` 是 **apply 阶段的依赖声明**，在 effect 回调里调用会抛错；
+这个错又被 `registerCadApi` 自己的 try/catch 吞掉，静默退回
+`ctx.get('webServer')` 轮询 —— 而轮询在桌面 profile 下永远取不到服务。
+
+于是路由**从来没挂上**，但 webServer 的 prefix 匹配仍然把请求交给了
+一个不存在的处理器，请求就**一直挂着**：
+- 浏览器：`net::ERR_UNEXPECTED` / 一直 pending
+- 命令行实测：`/api/progress`、`/api/probe` 全部超时（8 秒无响应）
+- 而同一时刻插件工具 `cad_draw_probe` **1 秒返回** → 证明宿主和引擎都好的
+
+修正：
+
+```js
+const disposeApi = registerCadApi(ctx, { log })     // ✅ apply 里直接调
+if (typeof disposeApi === 'function') ctx.effect(() => disposeApi)
+```
+
+**另外加了诊断日志**，下次再出问题一眼就能定性：
+
+```
+%TEMP%\dsh-cad-draw-api.log
+```
+
+- 文件为空 → 路由没注册上（注册问题）
+- 有内容但请求超时 → 处理器内部卡住（引擎/COM 问题）
+
+离线自检：
+
+```
+工具数: 5
+路由: ["/dsh-cad-draw","/api/dsh-cad-draw"]
+```
+
+### v0.9.9
 ### v0.9.9（当前）
 
 **找到面板接口「请求一直挂着」的根因：路由压根没注册上。**
