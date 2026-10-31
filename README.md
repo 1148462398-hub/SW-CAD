@@ -8,6 +8,58 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.12.1（当前）
+
+**补齐标注三件套（用户第二批要求）。**
+
+1. **角度尺寸标注**（原来只有外形/直径/线性）
+   - 找共享端点的两条直线 → 算夹角 → 10°~170° 才算真角度（0°/180° 是共线）
+   - 每视图限量（零件 2 个、装配 1 个），顶点附近不重复标
+   - `AddDimAngular(顶点, p1, p2, 文字点)`，文字放角平分线外侧
+
+2. **遮挡检查 + 自动挪位置 + 多轮复查**
+
+   ```python
+   resolve_dimension_overlaps(doc, text_h, rounds=3)
+   ```
+
+   - 取每个标注的**文字框**（TextPosition + 字高/字数估算）
+   - 两两比较，重叠且间距不足 → 把后出现的沿「远离对方」方向平移
+   - **多轮迭代**：挪一次可能撞上第三个，所以要循环到没有新冲突
+
+3. **颜色 / 线宽 / 小数位统一**
+
+   ```python
+   normalize_dimension_style(doc, text_h)
+   ```
+
+   - 颜色显式 7（ByBlock 单色打印会变白）
+   - 线宽统一细实线 25（0.25mm）
+   - 整数→0 位小数，非整数→2 位
+
+**顺序修正（用户指正 13/14 反了）**
+
+```
+acad_layers（分图层）  →  acad_style（建样式）  →  acad_layout_by_layer（移动）
+```
+
+⚠ 踩坑：一开始把这个分图层提前到「打开文档后」，结果图框分类退化
+（`DSH_FRAME` 从 51 个掉到 4 个，图框全留在 0 层，打印出来是白纸）。
+正确做法是**仍留在 auto_dimension 内部**，只把建样式挪到它后面。
+
+实测（零件「机架」，A3）：
+
+```
+[acad_layers]      DSH_FRAME=51 DSH_TITLE=65
+[acad_scale_factor] 1:1.0
+[acad_style]        在 layers 之后
+[acad_angles]       count=2
+[acad_dim_style]    count=9
+[acad_overlap]      rounds=3 moved=2 remaining=0
+[acad_dimensioned]  外形2 直径3 线性2 角度2
+```
+
+### v0.12.0
 ### v0.12.0（当前）
 
 **按用户逐条指正重排流程（第一批）。**
