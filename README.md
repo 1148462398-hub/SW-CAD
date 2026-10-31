@@ -8,6 +8,60 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.9.7（当前）
+
+**修「软件启动路径添加不进去 + 自动探测半天没结果」。**
+
+根因是一个很隐蔽的错误：`defaultForm` 其实是**函数**——
+
+```js
+function defaultForm() { return { views: [...], ... } }   // ← 函数
+const [form, setForm] = useState(defaultForm)             // 靠 lazy initializer 调用，没问题
+```
+
+但 v0.9.4 里我为了「热更新补默认字段」写成了：
+
+```js
+const form = { ...defaultForm, ...rawForm }   // ❌ 展开一个函数 = {}
+```
+
+展开函数只得到 `{}`，**所有默认字段（包括 `views`）全部丢失**。
+于是：输入框回填空白、`form.views.includes()` 直接抛错、
+整个面板状态错乱（表现为「填了也加不进去」）。
+
+正确写法：
+
+```js
+const DEFAULTS = defaultForm()          // 先调用
+const form = { ...DEFAULTS, ...rawForm }
+```
+
+**另外加了 localStorage 持久化**（用户填的路径不该因为刷新/热更新丢）：
+
+- 表单变化防抖 300ms 存 `dsh-cad-draw.form`
+- 探测结果存 `dsh-cad-draw.probe`，重挂载时先用缓存渲染
+- 挂载时与 `defaultForm()` 合并，并对 `views` 做数组兜底
+
+实测三种场景（mock React 真实渲染）：
+
+```
+全新（无缓存）:    OK 144 节点  exe 输入框 = (空) | (空)
+旧缓存缺 views:    OK 144 节点  exe 输入框 = X | (空)
+完整缓存:          OK 144 节点  exe 输入框 = \SOLIDWORKS\SLDWORKS.exe | sk\AutoCAD 2018\acad.exe
+```
+
+**关于「自动探测半天没探测到」**：实测 `probe()` 本身只要 **0.13 秒**，
+两个路径都能找到：
+
+```
+solidworks: F:\sw\SOLIDWORKS\SLDWORKS.exe            exists=true
+autocad:    C:\Program Files\Autodesk\AutoCAD 2018\acad.exe  exists=true
+```
+
+慢的假象同样来自 state 丢失 —— 探测结果到了但渲染没留住。
+现在结果会缓存，且打开面板立刻先用缓存显示。
+
+### v0.9.6
 ### v0.9.6（当前）
 
 **软件启动路径也改成浏览选择**（用户要求：SolidWorks / AutoCAD 的 exe 也要
