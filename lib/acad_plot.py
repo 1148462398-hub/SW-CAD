@@ -140,31 +140,67 @@ def _bbox(e):
 
 
 def find_outermost_box(doc):
-    """找最外层包围框：所有闭合多段线里面积最大的那个。
+    """找最外层包围框，返回 [x0, y0, x1, y1]（图纸单位 mm）。
+
+    优先级：
+      1. 面积最大的**闭合多段线**（GB 图框通常是矩形多段线）
+      2. 图框层 `DSH_FRAME` 的几何范围
+      3. 所有可见实体的总范围（最后兜底，总比打不出来强）
 
     注意：即使图层被关闭/冻结，实体仍在 ModelSpace 里，照样能读到 ——
     用户把包围框藏起来之后这个函数依然有效。
+
+    ⚠ 踩过的坑：只认闭合多段线时，若图框是用 4 条 LINE 画的，
+    会报「找不到最外层包围框（没有闭合多段线）」直接打印失败。
     """
     ms = doc.ModelSpace
     best = None
     best_area = -1.0
+    frame = None           # DSH_FRAME 层几何范围
+    everything = None      # 全部几何范围
+
+    def grow(cur, b):
+        if not b:
+            return cur
+        if cur is None:
+            return list(b)
+        return [min(cur[0], b[0]), min(cur[1], b[1]),
+                max(cur[2], b[2]), max(cur[3], b[3])]
+
     for i in range(ms.Count):
         try:
             e = ms.Item(i)
-            if str(e.ObjectName) != 'AcDbPolyline':
-                continue
-            if not e.Closed:
-                continue
+            name = str(e.ObjectName)
+
+            if name == 'AcDbPolyline':
+                try:
+                    if e.Closed:
+                        b = _bbox(e)
+                        if b:
+                            area = (b[2] - b[0]) * (b[3] - b[1])
+                            if area > best_area:
+                                best_area = area
+                                best = b
+                except Exception:
+                    pass
+
+            # 同时累积兜底范围
             b = _bbox(e)
-            if not b:
-                continue
-            area = (b[2] - b[0]) * (b[3] - b[1])
-            if area > best_area:
-                best_area = area
-                best = b
+            if b:
+                everything = grow(everything, b)
+                try:
+                    if str(e.Layer) == 'DSH_FRAME':
+                        frame = grow(frame, b)
+                except Exception:
+                    pass
         except Exception:
             continue
-    return best
+
+    if best:
+        return best
+    if frame:
+        return frame
+    return everything
 
 
 def guess_paper(box):
