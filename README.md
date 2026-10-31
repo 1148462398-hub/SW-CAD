@@ -8,6 +8,39 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.9.4（当前）
+
+**修「拖进去界面黑了」**。
+
+原因：面板热更新后，`useState(defaultForm)` 里保存的还是**旧对象**，
+里面没有 v0.9.3 新加的 `outDir` 字段。而「会存到：」那行写的是
+
+```js
+form.outDir.trim()      // ← undefined.trim() 抛 TypeError
+```
+
+React 渲染时抛异常 → 整棵子树崩 → 面板黑屏。
+之所以「一拖就黑」，是因为这行被 `file && ...` 挡着，
+只有拖入文件（`file` 变真）才会执行到。
+
+修法两层：
+
+1. 取值全部兜底：`String(form.outDir || '').trim()`、`value: form.outDir || ''`
+2. **根上防住**：组件顶部每次渲染都合并一次默认值
+
+```js
+const [rawForm, setForm] = useState(defaultForm)
+const form = { ...defaultForm, ...rawForm }   // ★ 新增字段自动补上
+```
+
+以后再加字段，热更新也不会因为「旧 state 缺字段」炸掉。
+
+验证：用 mock React 把组件真实渲染一遍（模拟旧 form + 已拖入 .SLDASM）——
+145 个节点全部正常，「装配体（整套图纸）」「会存到」都在。
+
+⚠ 这个改动在 `client.js`，需要**页面强制刷新（Ctrl+F5）**才生效。
+
+### v0.9.3
 ### v0.9.3（当前）
 
 用户实测提的三个问题，全部修复：
