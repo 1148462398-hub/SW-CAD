@@ -8,6 +8,40 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.7.0（当前）
+
+**支持装配图**：`.SLDASM` 现在会走装配图流程，自动插入**明细表（BOM）**。
+
+- `is_assembly` 判定 + `assembly` 阶段（报告零件实例数）
+- 新增 `insert_bom_table()`：在第一个视图上插 GB 明细表，位置在标题栏正上方
+- 新增 `bom` / `bomTemplate` / `bomAnchor` / `bomType` 参数
+
+关键 API 坑（从 `sldworks.tlb` 读出来的真实签名）：
+
+```python
+IView::InsertBomTable3(
+    UseAnchorPoint: bool,   # ← 第一个参数不是模板路径！
+    X: float, Y: float,     # 米
+    AnchorType: int,        # 0左上 1右上 2左下 3右下
+    BomType: int,           # 0仅零件 1仅顶层 2缩进
+    Configuration: str,
+    TableTemplate: str,     # .sldbomtbt
+    Hidden: bool)
+```
+
+按旧文档把模板路径塞第一个参数，只会报 `类型不匹配。 (None, 1)`。
+
+另修两个 bug：
+
+- **`open_model` 打不开 `.SLDDRW`** —— 原来只区分 `.sldasm` 与「其它=零件」，
+  图纸也按零件类型打开，返回 None，报错却是 `'NoneType' object has no attribute 'GetTitle'`。
+- **明细表伸出图框** —— `AnchorType=3` 时 X 给的是左下角，表格向右铺。
+  给 315mm 时整体铺到 483mm（A3 只有 420）。改成 `pw - 0.185` 后包围框正好 `[0,0,420,297]`。
+
+⚠ 还没做：**零件序号（气泡）**。`IDrawingDoc::AutoBalloon4` 的 10 个参数已确认，
+但它要求先选中视图，`SelectByID2` 的 Callout 参数类型还没试对，目前返回 None。
+
+### v0.6.5
 ### v0.6.5（当前）
 
 - **打通 FeatureWorks 的 COM 绑定**（新增 `lib/featureworks.py`）。
