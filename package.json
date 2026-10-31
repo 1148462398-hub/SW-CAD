@@ -1,6 +1,6 @@
 {
   "name": "dsh-cad-draw",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "description": "SolidWorks 模型自动出工程图：拖拽上传 → 套图框 → 三视图+剖视 → 按所选标注标准(GB/ISO/ASME)标尺寸/公差/粗糙度 → DXF/DWG/PDF，支持自定义 SolidWorks 与 AutoCAD 启动路径",
   "type": "module",
   "main": "lib/index.js",
