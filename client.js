@@ -115,18 +115,27 @@ window.__ModuleLoader__.load({
         color: 'inherit'
       },
       check: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 },
+      // 复选框：显式 accent-color，避免主题色太浅看不清
+      cb: { accentColor: '#1f6fb2', width: 15, height: 15, cursor: 'pointer' },
       btn: (primary, disabled) => ({
         padding: '9px 18px',
         fontSize: 13,
-        fontWeight: 500,
+        fontWeight: 600,
         borderRadius: 7,
-        border: primary ? 'none' : '1px solid var(--dsw-alias-border-secondary, #d0d0d0)',
+        border: primary
+          ? '1px solid #1a5680'
+          : '1px solid var(--dsw-alias-border-secondary, #d0d0d0)',
         cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.55 : 1,
+        // 主按钮不要依赖主题品牌色：某些主题里 --dsw-alias-brand-primary 很浅，
+        // 白字压在上面完全看不清（实测踩过）。这里用固定深蓝 + 显式白字。
         background: primary
-          ? 'var(--dsw-alias-brand-primary, #247bbf)'
+          ? (disabled ? '#b6c4d0' : '#1f6fb2')
           : 'transparent',
-        color: primary ? '#fff' : 'inherit'
+        color: primary
+          ? (disabled ? '#4a5763' : '#ffffff')
+          : 'inherit',
+        textShadow: 'none',
+        whiteSpace: 'nowrap'
       }),
       fileChip: {
         display: 'inline-flex',
@@ -209,7 +218,9 @@ window.__ModuleLoader__.load({
         drawingNumber: '',
         revision: 'A',
         exportDxf: true,
-        exportDwg: true
+        exportDwg: true,
+        // AutoCAD 后处理：把视图搬进图框 + 国标标注 + 标题栏
+        acadDimension: true,
       }
     }
 
@@ -377,6 +388,7 @@ window.__ModuleLoader__.load({
             },
             exportDxf: form.exportDxf,
             exportDwg: form.exportDwg,
+            acadDimension: form.acadDimension,
             preview: true
           }
           const res = await fetch(API + '/api/build', {
@@ -573,6 +585,7 @@ window.__ModuleLoader__.load({
                 h('label', { key, style: styles.check },
                   h('input', {
                     type: 'checkbox',
+                    style: styles.cb,
                     checked: form.views.includes(key),
                     onChange: () => toggleView(key)
                   }),
@@ -607,6 +620,7 @@ window.__ModuleLoader__.load({
             h('label', { style: styles.check },
               h('input', {
                 type: 'checkbox',
+                style: styles.cb,
                 checked: form.toleranceOn,
                 onChange: (e) => set('toleranceOn', e.target.checked)
               }), '加尺寸公差')
@@ -643,6 +657,7 @@ window.__ModuleLoader__.load({
             h('label', { style: styles.check },
               h('input', {
                 type: 'checkbox',
+                style: styles.cb,
                 checked: form.roughnessOn,
                 onChange: (e) => set('roughnessOn', e.target.checked)
               }), '加粗糙度符号')
@@ -728,6 +743,7 @@ window.__ModuleLoader__.load({
             h('label', { style: styles.check },
               h('input', {
                 type: 'checkbox',
+                style: styles.cb,
                 checked: form.fixtureCenterline,
                 onChange: (e) => set('fixtureCenterline', e.target.checked)
               }), '在视图里画夹具/基准中心线')
@@ -786,20 +802,34 @@ window.__ModuleLoader__.load({
 
           /* 输出 */
           h('div', { style: styles.sectionTitle }, '输出格式'),
-          h('div', { style: { display: 'flex', gap: 16, marginBottom: 4 } },
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, marginBottom: 4 } },
             h('label', { style: styles.check },
               h('input', {
                 type: 'checkbox',
+                style: styles.cb,
                 checked: form.exportDxf,
                 onChange: (e) => set('exportDxf', e.target.checked)
               }), 'DXF'),
             h('label', { style: styles.check },
               h('input', {
                 type: 'checkbox',
+                style: styles.cb,
                 checked: form.exportDwg,
                 onChange: (e) => set('exportDwg', e.target.checked)
-              }), 'DWG')
+              }), 'DWG'),
+            h('label', { style: styles.check, title: '用 AutoCAD 把视图搬进图框、加国标尺寸标注、填标题栏。关掉后视图会直接在 SolidWorks 里摆好，但不会有 AutoCAD 标注' },
+              h('input', {
+                type: 'checkbox',
+                style: styles.cb,
+                checked: form.acadDimension,
+                onChange: (e) => set('acadDimension', e.target.checked)
+              }), 'AutoCAD 后处理')
           ),
+          h('div', { style: { fontSize: 11, opacity: 0.7, marginBottom: 4 } },
+            form.acadDimension
+              ? '视图会先摊到框外，再由 AutoCAD 搬回图框内并标注（推荐）'
+              : '不开 AutoCAD：视图直接在 SolidWorks 里摆进图框，但没有国标标注')
+          ,
 
           /* 操作 */
           h('div', { style: { marginTop: 20, display: 'flex', gap: 10 } },
