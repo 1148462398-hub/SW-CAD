@@ -8,6 +8,60 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.11.0（当前）
+
+**架构调整：AI 工具当主力，面板退为「参数收集器」。**
+
+用户提出：「完全靠插件代码很难做到检测路径和出图，能否少量调用 AI 模型来帮助，
+插件只要提供绘图的方法来指导模型就行」。
+
+这个判断是对的，而且有实测依据：
+
+| 通道 | 状态 | 证据 |
+|---|---|---|
+| **插件工具**（`cad_draw_probe` / `cad_draw_build`） | ✅ 一直可靠 | probe 0.13s 返回；今晚出过 13 张整套图纸 |
+| **面板 HTTP 接口** | ❌ 桌面端会挂住 | 日志证明请求进了处理器，但回包出不来 |
+
+所以新增两件东西：
+
+**① 新工具 `cad_draw_pick`**
+
+```jsonc
+cad_draw_pick({ kind: "model" | "folder" | "exe", initial: "D:\\" })
+// → { ok, path, canceled }
+```
+
+弹的是**真正的 Windows 原生对话框**（`OpenFileDialog` / `FolderBrowserDialog`），
+走工具通道调用 —— 这条路今晚从没失败过。
+
+**② 面板新增「推荐：交给 AI 出图」**
+
+- 按钮「生成给本鱼的指令（复制）」：把当前面板所有参数拼成一条指令，复制到剪贴板
+- 生成的文本可以直接粘到对话框
+- 原来那排「开始出图」按钮保留，但明确标注「HTTP 通道，可能无响应」
+
+生成的指令长这样：
+
+```text
+用 cad_draw_build 出图：
+  model: "D:\5寸机\装配体1.SLDASM"
+  outDir: "D:\5寸机\出图_装配体1"
+  paperSize: "A3"
+  annotationStandard: "GB"
+  views: ["front", "top", "right"]
+  landscape: true
+  bom: true
+  balloons: true
+  drawset: true
+```
+
+**为什么这样分工合理**
+
+- 参数收集、路径选择、图幅/标准这些都交给面板（点选式，用户直观）
+- 真正需要「判断」的部分（选哪个文件、弹窗、看图验证、错了重试）交给 AI
+- 底层出图仍然 100% 是插件代码（`engine.py` + SolidWorks/AutoCAD COM），AI 只做调度
+
+### v0.10.1
 ### v0.10.1（当前）
 
 **加诊断细目日志 + 25 秒看门狗**（不再无限转圈）。
