@@ -39,9 +39,24 @@ def _vec2(x, y):
     return VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, (float(x), float(y)))
 
 
-def connect():
-    """连上 AutoCAD，返回 (acad, doc)。cc 用 Dispatch，GetActiveObject 会 MK_E_UNAVAILABLE。"""
+def connect(exe_hint=None, log=None):
+    """连上 AutoCAD，返回 (acad, doc)。
+
+    用 Dispatch 而不是 GetActiveObject（后者常报 MK_E_UNAVAILABLE）。
+    exe_hint：面板里配的 acad.exe 路径；没在跑就按这个路径拉起来。
+    """
     pythoncom.CoInitialize()
+    try:
+        import apps
+        _, source, msg = apps.ensure_running(apps.AUTOCAD, exe_hint, log=log)
+        if log:
+            try:
+                log(f'AutoCAD: {msg}（来源 {source}）')
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     acad = win32.Dispatch('AutoCAD.Application')
     if acad.Documents.Count == 0:
         acad.Documents.Add()
@@ -201,7 +216,7 @@ def _wait_plot_idle(doc, rounds=20, sleep=0.5):
 
 
 def export_pdf(dwg_path, pdf_path, paper=None, monochrome=True,
-               timeout_s=120, log=None):
+               timeout_s=120, log=None, exe_hint=None):
     """把一个 DWG 按「最外层包围框」打印成 PDF。
 
     参数
@@ -225,7 +240,7 @@ def export_pdf(dwg_path, pdf_path, paper=None, monochrome=True,
     result = {'ok': False, 'pdf': pdf_path, 'steps': steps}
 
     try:
-        acad, _ = connect()
+        acad, _ = connect(exe_hint=exe_hint, log=log)
         doc = open_or_activate(acad, dwg_path)
         steps.append('connected')
         emit(f'已连接 AutoCAD：{doc.Name}')
