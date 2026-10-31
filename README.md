@@ -8,7 +8,19 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
-### v0.5.1（当前）
+### v0.6.0（当前）
+
+**可配置 SolidWorks / AutoCAD 启动路径。**
+
+多版本共存、装在非默认盘、或 COM 连错版本时，自动探测经常不准。现在：
+
+- 侧边栏面板新增「软件启动路径」两个输入框 + 一个「检测路径」按钮
+- `cad_draw_build` / `cad_draw_pdf` / `cad_draw_probe` 都支持 `solidworksExe` / `autocadExe` 参数
+- 探测优先级：**手动指定 → 注册表 → 常见安装位置**
+- `autocadExe` 可以只填安装目录，插件会自动补 `acad.exe`
+- 「检测路径」只报告状态、**不会启动**程序（避免点一下卡一分钟）
+
+### v0.5.1
 
 修复两个实测出来的 bug：
 
@@ -64,6 +76,30 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 | **AutoCAD 2018+** | 标注后处理与 PDF 打印，需有 `DWG To PDF.pc3` |
 | **Python 3.11** + `pywin32` | 引擎脚本 |
 | DSH ≥ 0.2 | 插件宿主 |
+
+## 软件启动路径（v0.6.0）
+
+面板里两个输入框，留空则自动探测：
+
+| 字段 | 填什么 | 说明 |
+|---|---|---|
+| `solidworksExe` | `F:\sw\SOLIDWORKS\SLDWORKS.exe` | SLDWORKS.exe 绝对路径 |
+| `autocadExe` | `C:\Program Files\Autodesk\AutoCAD 2018\acad.exe` | 可只填安装目录，自动补 `acad.exe` |
+
+探测顺序：**手动指定 → 注册表 → 常见安装位置**。
+
+```jsonc
+// 或写在插件配置里（dsh/cordis.patch.yml）
+config:
+  solidworksExe: 'F:\sw\SOLIDWORKS\SLDWORKS.exe'
+  autocadExe: 'C:\Program Files\Autodesk\AutoCAD 2018\acad.exe'
+```
+
+显式路径的价值：先按路径把进程拉起来，再 `Dispatch` 连运行中的实例。
+多版本共存时不会连错版本，绿色版 / 非默认盘也能用。
+
+「检测路径」按钮只报告**找到没、在不在跑**，不会启动程序——
+否则点一下就卡 30~60 秒，很容易让人以为插件挂了。
 
 ## 能力
 
