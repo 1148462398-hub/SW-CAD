@@ -8,6 +8,38 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.10.1（当前）
+
+**加诊断细目日志 + 25 秒看门狗**（不再无限转圈）。
+
+从 `%TEMP%\dsh-cad-draw-api.log` 已经确认：**路由注册是通的、请求进了处理器**：
+
+```
+18:01:00Z GET  /dsh-cad-draw/api/probe
+18:01:04Z POST /dsh-cad-draw/api/pick-file
+18:01:20Z GET  /dsh-cad-draw/api/probe
+```
+
+所以卡点在处理器**内部**，不在注册。加了四级日志把卡点钉死：
+
+```
+ENTER   GET /dsh-cad-draw/api/probe
+  probe: 命中，开始探测
+  probe: 探测完成 313ms，回包
+EXIT    GET /api/probe 320ms
+```
+
+| 日志停在哪一行 | 说明 |
+|---|---|
+| 只有 `ENTER` | 路由分发前就卡了 |
+| `ENTER` + `命中`，没有「完成」 | **卡在 `await probe()` 里**（引擎/子进程） |
+| 有「完成」没有 `EXIT` | 卡在 `sendJson`（`res` 不是 Node 响应对象） |
+| 有 `WATCHDOG 强制回 504` | 25 秒没回包，被看门狗兜住 |
+
+看门狗会在 25 秒时强制返回 504 并附日志路径，界面至少能给出明确报错，
+而不是一直转圈让人以为「探测不到」。
+
+### v0.10.0
 ### v0.10.0（当前）
 
 **面板接口「一直挂着不返回」的最终根因：`ctx.inject` 被包在 `ctx.effect` 里调用。**
