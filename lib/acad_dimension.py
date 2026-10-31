@@ -1878,9 +1878,15 @@ def auto_dimension(doc, opts=None):
     view_boxes = opts.get('viewBoxes')
     if view_boxes and opts.get('layoutByLayer', True):
         try:
-            counts = classify_into_layers(doc, view_boxes, paper_w, paper_h,
-                                          bom_box=opts.get('bomBoxMm'))
-            emit({'stage': 'acad_layers', 'counts': counts})
+            # 若 dimension_dwg 已经在建标注样式**之前**分好图层，
+            # 这里直接复用（用户要求：先分图层 14 → 再建样式 13）。
+            pre = opts.get('preClassified')
+            if pre:
+                counts = pre
+            else:
+                counts = classify_into_layers(doc, view_boxes, paper_w, paper_h,
+                                              bom_box=opts.get('bomBoxMm'))
+                emit({'stage': 'acad_layers', 'counts': counts})
             view_layers = [n for n in counts if n.startswith('DSH_VIEW_')]
             if view_layers and opts.get('moveViews', True):
                 layout_placed = move_views_by_layer(
@@ -2073,14 +2079,7 @@ def dimension_dwg(dwg_path, opts=None, visible=False, out_path=None, exe_hint=No
         except Exception:
             pass
 
-        # 从 options 里拿图纸比例，用于 DIMLFAC 补偿
-        scale_den = opts.get('scaleDen') or opts.get('scale_den')
-        scale_num = opts.get('scaleNum') or opts.get('scale_num') or 1
-        style_name, var_ok = setup_gb_dimstyle(
-            doc, 'GB', scale_den=scale_den, scale_num=scale_num)
-        emit({'stage': 'acad_style', 'style': style_name, 'vars': var_ok})
-
-        # 把图幅信息传给 auto_dimension，用于排除图框线
+        # 把图幅信息算出来（后面分图层和标注都要用）
         try:
             from engine import PAPER_SIZE_M
         except Exception:
@@ -2093,6 +2092,31 @@ def dimension_dwg(dwg_path, opts=None, visible=False, out_path=None, exe_hint=No
                 pw, ph = size[0] * 1000.0, size[1] * 1000.0
         if pw:
             opts = {**opts, 'paperW': pw, 'paperH': ph}
+
+        # ★ 顺序修正（用户指出 13/14 反了）：**先分图层，再建标注样式**。
+        # 分图层要靠三样框：① 每个视图的包围框 ② 工程图图框（纸面边界）
+        # ③ 明细表框（装配图）。三样都在这里一次性给全，后面标注阶段
+        # 直接复用结果，不再重复分类。
+        view_boxes = opts.get('viewBoxes')
+        if view_boxes and opts.get('layoutByLayer', True):
+            try:
+                counts = classify_into_layers(
+                    doc, view_boxes, pw, ph,
+                    bom_box=opts.get('bomBoxMm'))
+                emit({'stage': 'acad_layers', 'counts': counts,
+                      'boxes': {'views': len(view_boxes),
+                                'frame': [0, 0, pw, ph],
+                                'bom': opts.get('bomBoxMm')}})
+                opts = {**opts, 'preClassified': counts}
+            except Exception as exc:
+                emit({'stage': 'acad_layers', 'error': str(exc)})
+
+        # 图层建好之后再建 GB 标注样式
+        scale_den = opts.get('scaleDen') or opts.get('scale_den')
+        scale_num = opts.get('scaleNum') or opts.get('scale_num') or 1
+        style_name, var_ok = setup_gb_dimstyle(
+            doc, 'GB', scale_den=scale_den, scale_num=scale_num)
+        emit({'stage': 'acad_style', 'style': style_name, 'vars': var_ok})
 
         stats = auto_dimension(doc, opts)
         emit({'stage': 'acad_dimensioned', **stats})
