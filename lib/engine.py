@@ -277,6 +277,141 @@ def insert_bom_table(dw, paper, landscape=True, template=None,
             'rows': rows}
 
 
+def assembly_components(asm_doc):
+    """列出装配体里用到的零件文件（按路径去重）。
+
+    用 GetComponents(False) 拿**所有层级**的组件（含子装配里的零件），
+    同一个零件装多个实例只保留一份——出零件图时每份零件只需要一张图。
+
+    返回 [{'path','name','instances'}]，按出现顺序排列。
+    """
+    out = []
+    index = {}
+    try:
+        comps = asm_doc.GetComponents(False)
+    except Exception as exc:
+        return {'ok': False, 'error': f'GetComponents 失败: {exc}', 'parts': []}
+
+    for c in comps or []:
+        try:
+            path = str(c.GetPathName or '')
+        except Exception:
+            path = ''
+        try:
+            name = str(c.Name2 or '')
+        except Exception:
+            name = ''
+        if not path:
+            continue
+        # 排除虚拟件/ toolbox 里没有实际文件的组件
+        if not os.path.isfile(path):
+            continue
+        # 子装配本身也带路径，但它是 .sldasm，零件图只画 .sldprt
+        if os.path.splitext(path)[1].lower() != '.sldprt':
+            continue
+        key = os.path.normcase(os.path.abspath(path))
+        if key in index:
+            out[index[key]]['instances'] += 1
+            continue
+        index[key] = len(out)
+        out.append({'path': path, 'name': name, 'instances': 1})
+
+    return {'ok': True, 'parts': out,
+            'count': len(out),
+            'totalInstances': sum(p['instances'] for p in out)}
+
+
+def insert_balloons(dw, layout=1, style=1, size=2,
+                    upper_content=0, lower_content=0,
+                    upper_text='', lower_text='', layername='',
+                    to_faces=False, ignore_multiple=True):
+    """在装配图上自动加零件序号（气泡）。
+
+    ⚠ 两个坑（都实测过）：
+      1. AutoBalloon4 **必须先选中视图**，否则直接返回 None，不报错。
+      2. 选中视图的 SelectByID2 第 8 个参数 Callout 不能传 None，
+         必须传 pythoncom.Empty，否则报「类型不匹配 (None, 8)」。
+
+    签名（从 sldworks.tlb 读，注意顺序，第一个是 Layout 不是 Style）：
+        IDrawingDoc::AutoBalloon4(
+            Layout, IgnoreMultiple, Style, Size,
+            UpperTextContent, UpperText, LowerTextContent, LowerText,
+            Layername, BalloonsToFaces)
+
+    Layout（swBalloonLayoutType_e）：1=圆形/自动 2=方形…
+    Style （swBalloonStyle_e）  ：1=圆形 2=三角 3=六角 4=方框
+    Size  （swBalloonFit_e）    ：0=紧密 1=1字符 2=2字符 3=3字符
+
+    返回 {'ok','selected','result','error'}
+    """
+    import pythoncom
+
+    # 收集视图 + 轮廓中心（按坐标点选比按名字更可靠）
+    targets = []
+    v = dw.GetFirstView
+    i = 0
+    while v is not None and i < 20:
+        if i > 0:
+            try:
+                nm = str(v.GetName2)
+                o = v.GetOutline
+                cx = (float(o[0]) + float(o[2])) / 2.0
+                cy = (float(o[1]) + float(o[3])) / 2.0
+                targets.append((nm, cx, cy))
+            except Exception:
+                pass
+        v = v.GetNextView
+        i += 1
+
+    if not targets:
+        return {'ok': False, 'error': '没有可用视图', 'selected': 0}
+
+    try:
+        dw.ClearSelection2(True)
+    except Exception:
+        pass
+
+    # ★★★ 本鱼调了一晚上才试出来的关键 ★★★
+    # SelectByID2 的第 8 个参数 Callout 必须是「**显式的空 IDispatch 指针**」：
+    #     VARIANT(pythoncom.VT_DISPATCH, None)
+    # 传 None / pythoncom.Empty / 0 全都会报「类型不匹配 (None, 8)」，
+    # 因为它们是 VT_EMPTY / VT_I4，不是 VT_DISPATCH。
+    # 另外 IView 对象上**没有** Select/Select2 方法，只能走 SelectByID2。
+    from win32com.client import VARIANT
+    null_disp = VARIANT(pythoncom.VT_DISPATCH, None)
+
+    selected = 0
+    for name, cx, cy in targets:
+        ok = False
+        try:
+            ok = bool(dw.Extension.SelectByID2(
+                name, 'DRAWINGVIEW', cx, cy, 0, True, 0, null_disp, 0))
+        except Exception:
+            ok = False
+        if ok:
+            selected += 1
+
+    if selected == 0:
+        return {'ok': False, 'error': '视图一个都没选中', 'selected': 0}
+
+    try:
+        r = dw.AutoBalloon4(
+            int(layout),                 # Layout
+            bool(ignore_multiple),       # IgnoreMultiple
+            int(style),                  # Style
+            int(size),                   # Size
+            int(upper_content), upper_text,
+            int(lower_content), lower_text,
+            str(layername),
+            bool(to_faces))
+    except Exception as exc:
+        return {'ok': False, 'error': f'{type(exc).__name__}: {exc}',
+                'selected': selected}
+
+    return {'ok': bool(r), 'selected': selected, 'result': r,
+            'views': len(targets)}
+
+
 def open_model(sw, path):
     """按扩展名用正确的文档类型打开。
 
@@ -2493,16 +2628,33 @@ def build(payload):
     # 明细表 API 的坑（实测 2026-11）：IView::InsertBomTable3 的第一个参数
     # 是 **UseAnchorPoint(bool)**，不是模板路径 —— 照老签名把模板路径塞第一个
     # 位置会报「类型不匹配。 (None, 1)」，很难看出来。
+    bom_result = None
+    balloon_result = None
     if is_assembly and payload.get('bom', True):
         try:
-            bom = insert_bom_table(dw, paper, landscape,
-                                   payload.get('bomTemplate') or BOM_TEMPLATE,
-                                   anchor=int(payload.get('bomAnchor', 3)),
-                                   bom_type=int(payload.get('bomType', 1)))
-            emit({'stage': 'bom', **bom})
+            bom_result = insert_bom_table(dw, paper, landscape,
+                                          payload.get('bomTemplate') or BOM_TEMPLATE,
+                                          anchor=int(payload.get('bomAnchor', 3)),
+                                          bom_type=int(payload.get('bomType', 1)))
+            emit({'stage': 'bom', **bom_result})
         except Exception as exc:
-            emit({'stage': 'bom', 'ok': False,
-                  'error': f'{type(exc).__name__}: {exc}'})
+            bom_result = {'ok': False, 'error': f'{type(exc).__name__}: {exc}'}
+            emit({'stage': 'bom', **bom_result})
+
+    # ── 装配体：零件序号（气泡）──
+    # 必须在明细表之后、保存之前做；有明细表时气泡编号才能和表里的「项目」对上。
+    if is_assembly and payload.get('balloons', True):
+        try:
+            balloon_result = insert_balloons(
+                dw,
+                layout=int(payload.get('balloonLayout', 1)),
+                style=int(payload.get('balloonStyle', 1)),
+                size=int(payload.get('balloonSize', 2)))
+            emit({'stage': 'balloons', **balloon_result})
+        except Exception as exc:
+            balloon_result = {'ok': False,
+                              'error': f'{type(exc).__name__}: {exc}'}
+            emit({'stage': 'balloons', **balloon_result})
 
     # ── 让视图显示隐藏线（内部结构以虚线导出）──
     # 用户要求：出「能看到内部」的视图。
@@ -2850,6 +3002,9 @@ def build(payload):
     return {
         'ok': bool(saved.get('drw')),
         'modelInfo': model_info,
+        'isAssembly': is_assembly,
+        'bom': bom_result,
+        'balloons': balloon_result,
         'model': model,
         'drawing': out_drw,
         'dxf': out_dxf,
@@ -2984,6 +3139,10 @@ def run():
     try:
         if action == 'build':
             result = build(payload)
+        elif action == 'drawset':
+            # 整套图纸：装配总图 + 每个零件图 → 合并成一个 DXF
+            import drawset
+            result = drawset.build_set(payload, emit)
         elif action == 'probe':
             result = probe(payload)
         elif action == 'close':
