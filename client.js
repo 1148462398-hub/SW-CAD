@@ -396,6 +396,7 @@ window.__ModuleLoader__.load({
         return c || { solidworks: null, autocad: null, python: '', revision: '', error: '' }
       })
       const [pdfPath, setPdfPath] = useState('')
+      const [cmdText, setCmdText] = useState('')
       const [log, setLog] = useState('')
       const [result, setResult] = useState(null)
       const inputRef = useRef(null)
@@ -710,6 +711,47 @@ window.__ModuleLoader__.load({
         }
       }, [form.solidworksExe, form.autocadExe])
 
+
+      /* 生成一条「给 AI 的指令」。
+         桌面端 HTTP 接口不可靠（dsh-app:// 下插件接口会被挂住），
+         但**工具调用这条路是稳的**。所以面板退一步：
+         收集参数 → 生成指令 → 用户粘进对话框 → AI 调工具完成。
+         这样出图完全不依赖插件自己的 HTTP 通道。 */
+      const buildCommand = useCallback(() => {
+        const model = pickedPath || file?.path || '<先拖入模型或用「选择模型文件」选>'
+        const lines = [`model: "${model}"`]
+        if (form.outDir) lines.push(`outDir: "${form.outDir}"`)
+        lines.push(`paperSize: "${form.paperSize}"`)
+        lines.push(`annotationStandard: "${form.annotationStandard}"`)
+        lines.push(`views: [${(form.views || []).map((v) => `"${v}"`).join(', ')}]`)
+        lines.push(`landscape: ${form.landscape !== false}`)
+        const isAsm = /\.sldasm$/i.test(String(model))
+        if (isAsm) {
+          lines.push(`bom: ${form.bom !== false}`)
+          lines.push(`balloons: ${form.balloons !== false}`)
+          if (form.drawset !== false) lines.push('drawset: true')
+        }
+        if (form.toleranceOn) {
+          lines.push(
+            `tolerance: { type: "${form.toleranceType}", plus: ${Number(form.tolerancePlus) || 0.05}, onlyOver: ${Number(form.toleranceOnlyOver) || 0} }`
+          )
+        }
+        if (form.roughnessOn) {
+          lines.push(`surfaceFinish: { value: "${form.roughnessValue || '3.2'}" }`)
+        }
+        const cmd = '用 cad_draw_build 出图：\n' + lines.map((l) => '  ' + l).join('\n')
+        setCmdText(cmd)
+        try {
+          if (typeof navigator !== 'undefined' && navigator?.clipboard?.writeText) {
+            navigator.clipboard.writeText(cmd)
+            setLog('指令已生成并复制到剪贴板 —— 粘贴到对话框发给本鱼即可出图。')
+          } else {
+            setLog('指令已生成（当前环境不能自动复制，请手动选中下面的文本）。')
+          }
+        } catch {
+          setLog('指令已生成（复制失败，请手动选中下面的文本）。')
+        }
+      }, [pickedPath, file, form, set])
 
       /* 打开面板就自动探测一次启动路径（只做一次，不打扰日志） */
       const autoDetectRef = useRef(false)
@@ -1197,8 +1239,39 @@ window.__ModuleLoader__.load({
                 : '只出装配总图（含 BOM + 气泡），不拆零件图')
           ),
 
+          /* 推荐用法：生成指令交给 AI 出图（不依赖插件 HTTP 通道） */
+          h('div', { style: styles.sectionTitle }, '推荐：交给 AI 出图'),
+          h('div', { style: { fontSize: 11.5, opacity: 0.75, marginBottom: 8, lineHeight: 1.7 } },
+            '桌面应用的页面来源是 ',
+            h('code', null, 'dsh-app://'),
+            '，插件自己的 HTTP 接口在这里会被挂住，所以下面的「开始出图」按钮可能没反应。',
+            h('br'),
+            '更稳的做法：填好参数后点下面这个按钮，把生成的指令粘贴到对话框发给本鱼，',
+            '本鱼用插件工具出图（这条路今晚已验证多次）。'
+          ),
+          h('div', { style: { display: 'flex', gap: 10, marginBottom: 8 } },
+            h('button', {
+              type: 'button',
+              style: styles.btn(true, false),
+              onClick: buildCommand
+            }, '生成给本鱼的指令（复制）')
+          ),
+          cmdText
+            ? h('textarea', {
+                readOnly: true,
+                value: cmdText,
+                style: {
+                  ...styles.input, width: '100%', boxSizing: 'border-box',
+                  minHeight: 120, resize: 'vertical', fontFamily: 'monospace',
+                  fontSize: 11.5, marginBottom: 8
+                },
+                onFocus: (e) => e.target.select()
+              })
+            : null,
+
           /* 操作 */
-          h('div', { style: { marginTop: 20, display: 'flex', gap: 10 } },
+          h('div', { style: styles.sectionTitle }, '或者：直接在本面板出图（HTTP 通道）'),
+          h('div', { style: { marginTop: 10, display: 'flex', gap: 10 } },
             h('button', {
               style: styles.btn(true, busy || pdfBusy || !file),
               disabled: busy || pdfBusy || !file,
