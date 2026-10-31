@@ -2191,8 +2191,24 @@ def import_neutral_to_part(sw, neutral_path, out_dir, emit):
 
 
 def build(payload):
-    model = payload['model']
+    model = (payload.get('model') or '').strip()
+    if not model:
+        raise ValueError(
+            '没有拿到模型路径。浏览器里 File 对象没有本地路径，'
+            '面板应该先 POST /api/upload 把文件存到本机再出图。')
+
+    # model 必须是绝对路径：只有文件名（如 "四氟盖.SLDPRT"）说明调用方
+    # 把浏览器里的 file.name 直接传过来了，dirname 会是 ''，
+    # 落到 os.makedirs('') 就报 [WinError 3] 系统找不到指定的路径。: ''
+    if not os.path.isabs(model):
+        raise ValueError(
+            f'模型路径不是绝对路径：{model!r}。'
+            '浏览器的 File 对象不含本地路径，请先调用 /api/upload 上传模型，'
+            '或用 cad_draw_build 传模型文件的绝对路径。')
+
     out_dir = payload.get('outDir') or os.path.dirname(model)
+    if not out_dir:
+        raise ValueError(f'推导不出输出目录（model={model!r}）')
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(model))[0]
 
