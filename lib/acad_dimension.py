@@ -361,6 +361,7 @@ def layout_views_in_frame(clusters, paper='A3', landscape=True,
 #   直接按图层选，整块移动绝不会撕碎，标注也能逐层做。
 LAYER_FRAME = 'DSH_FRAME'        # 图框 + 分区标记
 LAYER_TITLE = 'DSH_TITLE'        # 标题栏
+LAYER_BOM = 'DSH_BOM'            # 明细表（独立图层，不参与视图搬动）
 VIEW_LAYER_FMT = 'DSH_VIEW_{}'   # 每个视图一层：DSH_VIEW_1 / _2 …
 
 # 视图图层顺序 → 国标位置
@@ -425,26 +426,47 @@ def _entity_bbox(e, name):
     except Exception:
         return None
 
-def classify_into_layers(doc, view_boxes, paper_w, paper_h, tol=15.0):
-    """把模型空间里的图元分到 FRAME / TITLE / VIEW_n 图层。
+def classify_into_layers(doc, view_boxes, paper_w, paper_h, tol=15.0,
+                         bom_box=None):
+    """把模型空间里的图元分到 FRAME / TITLE / BOM / VIEW_n 图层。
 
     view_boxes: SolidWorks 报告的视图边界（毫米），用于判断图元属于哪个视图。
+    bom_box   : 明细表的外包围框 (x0,y0,x1,y1)，单位毫米。
+                用户思路：「BOM 也是包围框的思路，给外边缘做包围框，
+                然后 BOM 独立图层，避免和工程图图框以及视图重叠」。
+
     分配优先级：
-      1) 右下角标题栏区域        → DSH_TITLE
-      2) 贴图幅边缘 / 跨整幅长线 → DSH_FRAME
-      3) 落在某个视图框内        → DSH_VIEW_n（多个框重叠时取面积最小的）
-      4) 其余                    → 就近分配到视图
+      0) 落在明细表包围框内    → DSH_BOM（最高优先级，独立图层）
+      1) 右下角标题栏区域      → DSH_TITLE
+      2) 落在某个视图框内      → DSH_VIEW_n（多个框重叠时取面积最小的）
+      3) 贴图幅边缘 / 跨整幅   → DSH_FRAME
+      4) 与「视图框外扩 tol」相交 → DSH_VIEW_n
+      5) 其余                  → 不动（保留原图层）
 
     返回 {layerName: entityCount}
     """
     ms = doc.ModelSpace
     n_views = max(1, len(view_boxes or []))
     view_layers = ensure_view_layers(doc, n_views)
-    counts = {LAYER_FRAME: 0, LAYER_TITLE: 0}
+    counts = {LAYER_FRAME: 0, LAYER_TITLE: 0, LAYER_BOM: 0}
     for nm in view_layers:
         counts[nm] = 0
 
     boxes = sorted(view_boxes or [], key=lambda b: (b['x1'] - b['x0']) * (b['y1'] - b['y0']))
+    bom = None
+    if bom_box and len(bom_box) >= 4:
+        bom = (float(bom_box[0]), float(bom_box[1]),
+               float(bom_box[2]), float(bom_box[3]))
+
+    # ⚠ 必须先把这个图层建出来！
+    # 如果 DSH_BOM 不存在，`e.Layer = 'DSH_BOM'` 会抛异常，
+    # 而异常又被下面 try/except 吞掉 → 计数永远是 0、图元永远留在 0 层。
+    # 这个坑很隐蔽：代码看着完全正确，就是不动。
+    for _lay, _color in ((LAYER_FRAME, 7), (LAYER_TITLE, 7), (LAYER_BOM, 3)):
+        try:
+            ensure_layer(doc, _lay, color=_color)
+        except Exception:
+            pass
 
     for i in range(ms.Count):
         try:
@@ -472,8 +494,18 @@ def classify_into_layers(doc, view_boxes, paper_w, paper_h, tol=15.0):
 
         target = None
 
+        # 0) 明细表包围框内 → 独立图层（最高优先级）
+        #    必须先判，否则表格线会被当成图框或视图的一部分搬走。
+        if bom is not None:
+            if (cx >= bom[0] and cx <= bom[2]
+                    and cy >= bom[1] and cy <= bom[3]):
+                target = LAYER_BOM
+
         # 1) 标题栏区域（右下角）
-        if paper_w and paper_h:
+        # 1) 标题栏区域（右下角）
+        # ⚠ 必须加 target is None：否则会把已经判成 DSH_BOM 的
+        # 明细表图元再改回 DSH_TITLE（明细表也在右下角，两者区域重叠）。
+        if target is None and paper_w and paper_h:
             if cx > paper_w * 0.55 and cy < paper_h * 0.25:
                 target = LAYER_TITLE
 
@@ -500,18 +532,19 @@ def classify_into_layers(doc, view_boxes, paper_w, paper_h, tol=15.0):
                 if near_edge or spans:
                     target = LAYER_FRAME
 
-        # 4) 就近兜底：都不在框内时，按中心距离归给最近的视图
+        # 4) 就近兜底：只把**贴着视图框**的图元归给视图。
+        #
+        # ⚠ 这里以前是「无条件归给最近视图」，导致图框内部的分区线、
+        # 标题栏线条全被塞进视图图层，把视图包围框撑成
+        # 「高 340mm」这种尺寸（A3 只有 297），视图再也摆不进图框。
+        # 现在要求图元必须和「视图框外扩 tol」相交才算该视图的。
         if target is None and boxes:
-            dmin = None
-            best_idx = 0
             for idx, b in enumerate(boxes):
-                bcx = (b['x0'] + b['x1']) / 2.0
-                bcy = (b['y0'] + b['y1']) / 2.0
-                d = (cx - bcx) ** 2 + (cy - bcy) ** 2
-                if dmin is None or d < dmin:
-                    dmin = d
-                    best_idx = idx
-            target = VIEW_LAYER_FMT.format(len(boxes) - best_idx)
+                exp = (b['x0'] - tol, b['y0'] - tol,
+                       b['x1'] + tol, b['y1'] + tol)
+                if _rects_overlap((x0, y0, x1, y1), exp, 0.0):
+                    target = VIEW_LAYER_FMT.format(len(boxes) - idx)
+                    break
 
         if target:
             try:
@@ -523,18 +556,122 @@ def classify_into_layers(doc, view_boxes, paper_w, paper_h, tol=15.0):
     return counts
 
 
+def _rects_overlap(a, b, pad=0.0):
+    """两个 (x0,y0,x1,y1) 矩形是否重叠（pad 为额外安全间距）。"""
+    return not (a[2] + pad <= b[0] or b[2] + pad <= a[0]
+                or a[3] + pad <= b[1] or b[3] + pad <= a[1])
+
+
+def _place_avoiding(rect, target, reserved, placed, bounds, pad=6.0,
+                    step=8.0, max_try=40):
+    """把视图摆到 target，但避开 reserved（明细表/标题栏）和已放置的视图。
+
+    用户思路：「装配图也用零件图的思路——做出包围框再移动」。
+    既然每个视图都有包围框，那就让包围框**互相不重叠、也不压明细表**：
+      1. 从 target 开始，先尝试原地
+      2. 冲突就往上推（+y），推到顶就退回底部再往左挪（-x）
+      3. 都不行就接受最后一次位置（总比跑出图框强）
+
+    rect     : 本视图包围框 (x0,y0,x1,y1)
+    target   : 期望中心 (tx, ty)
+    reserved : [rect, ...] 不能进入的区域
+    placed   : [rect, ...] 已摆放的视图
+    bounds   : (x_min, y_min, x_max, y_max) 可画区
+    返回 (tx, ty, {'shifted': 次数, 'reason': ...})
+    """
+    cx = (rect[0] + rect[2]) / 2.0
+    cy = (rect[1] + rect[3]) / 2.0
+    w = max(rect[2] - rect[0], 1.0)
+    h = max(rect[3] - rect[1], 1.0)
+    bx0, by0, bx1, by1 = bounds
+
+    def rect_at(tx, ty):
+        return (tx - w / 2.0, ty - h / 2.0, tx + w / 2.0, ty + h / 2.0)
+
+    def inside(r):
+        return (r[0] >= bx0 - 0.5 and r[1] >= by0 - 0.5
+                and r[2] <= bx1 + 0.5 and r[3] <= by1 + 0.5)
+
+    def ok(r):
+        if not inside(r):
+            return False
+        for rr in reserved:
+            if _rects_overlap(r, rr, pad):
+                return False
+        for rr in placed:
+            if _rects_overlap(r, rr, pad):
+                return False
+        return True
+
+    tx, ty = float(target[0]), float(target[1])
+    if ok(rect_at(tx, ty)):
+        return tx, ty, {'shifted': 0, 'reason': 'original'}
+
+    # 沿 y 往上顶
+    tries = 0
+    for _ in range(max_try):
+        tries += 1
+        ty += step
+        r = rect_at(tx, ty)
+        if r[3] > by1:
+            break
+        if ok(r):
+            return tx, ty, {'shifted': tries, 'reason': 'up'}
+
+    # 沿 x 往左挪
+    ty0 = float(target[1])
+    for k in range(1, max_try + 1):
+        tries += 1
+        tx = float(target[0]) - k * step
+        r = rect_at(tx, ty0)
+        if r[0] < bx0:
+            break
+        if ok(r):
+            return tx, ty0, {'shifted': tries, 'reason': 'left'}
+
+    # 网格搜索：把整个可画区按 step 铺一遍，从「离目标最近」的格子开始试。
+    # 明细表很大时（13 行 ≈ 91mm 高），单纯上推左挪会找不到位置
+    # （实测 shifted=70 仍然 clamped），必须全图找空位。
+    cands = []
+    yy = by1 - h / 2.0
+    while yy >= by0 + h / 2.0 - 0.1:
+        xx = bx0 + w / 2.0
+        while xx <= bx1 - w / 2.0 + 0.1:
+            # 距离目标越近越优先
+            d = ((xx - target[0]) ** 2 + (yy - target[1]) ** 2) ** 0.5
+            cands.append((d, xx, yy))
+            xx += step
+        yy -= step
+    cands.sort(key=lambda c: c[0])
+    for _d, xx, yy in cands:
+        tries += 1
+        if ok(rect_at(xx, yy)):
+            return xx, yy, {'shifted': tries, 'reason': 'grid'}
+
+    # 实在摆不下：至少别跑到图框外
+    tx = min(max(float(target[0]), bx0 + w / 2.0), bx1 - w / 2.0)
+    ty = min(max(float(target[1]), by0 + h / 2.0), by1 - h / 2.0)
+    return tx, ty, {'shifted': tries, 'reason': 'clamped'}
+
+
 def move_views_by_layer(doc, view_layers, paper='A3', landscape=True,
-                        title_h=55.0, order=None):
+                        title_h=55.0, order=None, reserved=None,
+                        gap_mm=6.0):
     """按图层把每个视图整块移到国标固定位置。
 
     用户要求的做法：「按图层来移动」。
     按图层选中的所有图元一起 Move，整块平移，绝不会撕裂。
+
+    reserved：不能占用的矩形列表 [(x0,y0,x1,y1)]，单位 mm。
+              装配图上要传「明细表 + 标题栏」所占的区域，
+              否则视图会被摆到明细表上面去（实测真实装配图就是这样）。
 
     返回 {layerName: (x, y)}
     """
     targets = paper_targets(paper, landscape, title_h)
     order = order or VIEW_TARGET_ORDER
     ms = doc.ModelSpace
+    reserved = list(reserved or [])
 
     # 算每个图层的当前包围盒和中心
     info = []
@@ -583,6 +720,13 @@ def move_views_by_layer(doc, view_layers, paper='A3', landscape=True,
             key = 'isometric'
         assignments.append((t, key))
 
+    placed = {}
+    placed_rects = []
+
+    pw_mm, ph_mm = paper_size_mm(paper, landscape)
+    # 可画区：左边装订 25、其余 5；上边留 5
+    bounds = (25.0, 5.0, pw_mm - 5.0, ph_mm - 5.0)
+
     for t, key in assignments:
         if key in used:
             for alt in ('isometric', 'right', 'top', 'front'):
@@ -592,20 +736,18 @@ def move_views_by_layer(doc, view_layers, paper='A3', landscape=True,
         used.add(key)
         tx, ty = targets[key]
 
-        # 尺寸感知的边界约束：目标是视图**中心**，视图较高时中心即使
-        # 在标题栏上方，底边仍会压进标题栏。实测 A3 上轴测图中心
-        # y=60.7、半高 35 → 底边 25.7mm，直接压住高 55mm 的标题栏。
-        # 所以按视图实际尺寸把中心往上顶、往内收。
+        # 尺寸感知的边界约束（原来就有的兜底）
         w_v = (t['x1'] - t['x0'])
         h_v = (t['y1'] - t['y0'])
         min_cy = float(title_h) + h_v / 2.0 + 8.0
         if ty < min_cy:
             ty = min_cy
-        pw_mm, _ph_mm = paper_size_mm(paper, landscape)
-        if tx - w_v / 2.0 < 20.0:
-            tx = 20.0 + w_v / 2.0
-        if tx + w_v / 2.0 > pw_mm - 8.0:
-            tx = pw_mm - 8.0 - w_v / 2.0
+
+        # ★ 关键修复：按包围框避让明细表和已放视图
+        # 之前视图直接被摆到明细表上（真实装配图实测压住 BOM）。
+        rect = (t['x0'], t['y0'], t['x1'], t['y1'])
+        tx, ty, how = _place_avoiding(rect, (tx, ty), reserved, placed_rects,
+                                      bounds, pad=gap_mm)
 
         dx, dy = tx - t['cx'], ty - t['cy']
         moved = 0
@@ -618,8 +760,12 @@ def move_views_by_layer(doc, view_layers, paper='A3', landscape=True,
                 moved += 1
             except Exception:
                 pass
+        # 记录最终落位后的包围框，供后续视图避让
+        placed_rects.append((t['x0'] + dx, t['y0'] + dy,
+                             t['x1'] + dx, t['y1'] + dy))
         placed[t['layer']] = {'target': (round(tx, 1), round(ty, 1)),
-                              'moved': moved, 'slot': key}
+                              'size': (round(w_v, 1), round(h_v, 1)),
+                              'moved': moved, 'slot': key, **how}
 
     return placed
 
@@ -1554,15 +1700,19 @@ def auto_dimension(doc, opts=None):
     view_boxes = opts.get('viewBoxes')
     if view_boxes and opts.get('layoutByLayer', True):
         try:
-            counts = classify_into_layers(doc, view_boxes, paper_w, paper_h)
+            counts = classify_into_layers(doc, view_boxes, paper_w, paper_h,
+                                          bom_box=opts.get('bomBoxMm'))
             emit({'stage': 'acad_layers', 'counts': counts})
             view_layers = [n for n in counts if n.startswith('DSH_VIEW_')]
             if view_layers and opts.get('moveViews', True):
                 layout_placed = move_views_by_layer(
                     doc, view_layers, paper, landscape,
-                    title_h=float(opts.get('titleBlockMm', 55.0)))
+                    title_h=float(opts.get('titleBlockMm', 55.0)),
+                    reserved=opts.get('reservedRects') or [],
+                    gap_mm=float(opts.get('viewGapMm', 6.0)))
                 emit({'stage': 'acad_layout_by_layer',
-                      'placed': layout_placed})
+                      'placed': layout_placed,
+                      'reserved': opts.get('reservedRects') or []})
         except Exception as exc:
             emit({'stage': 'acad_layout_by_layer', 'error': str(exc)})
 
