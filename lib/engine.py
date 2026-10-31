@@ -114,6 +114,8 @@ TOLERANCE_TYPES = {
 
 DEFAULT_TEMPLATE = r'F:\sw\SOLIDWORKS\data\templates\gb.drwdot'
 SHEETFORMAT_DIR = r'C:\ProgramData\SOLIDWORKS\SOLIDWORKS 2020\lang\Chinese-Simplified\sheetformat'
+# 装配图明细表（BOM）的表格模板
+BOM_TEMPLATE = r'F:\sw\SOLIDWORKS\lang\chinese-simplified\bom-standard.sldbomtbt'
 
 NEUTRAL_EXTS = ('.step', '.stp', '.iges', '.igs', '.x_t', '.x_b', '.sat')
 
@@ -213,11 +215,84 @@ def sweep_documents(sw, keep=None):
     return closed
 
 
+def insert_bom_table(dw, paper, landscape=True, template=None,
+                     anchor=3, bom_type=1):
+    """在装配图的第一个视图上插入明细表（BOM）。
+
+    ⚠ API 签名（从 sldworks.tlb 读出，别凭记忆）：
+        IView::InsertBomTable3(
+            UseAnchorPoint: bool,      ← 不是模板路径！
+            X: double, Y: double,      ← 米
+            AnchorType: int,           ← 0左上 1右上 2左下 3右下
+            BomType: int,              ← 0仅零件 1仅顶层 2缩进
+            Configuration: str,
+            TableTemplate: str,        ← BOM 表格模板 .sldbomtbt
+            Hidden: bool)
+        返回 IBomTableAnnotation
+
+    GB 习惯：明细表放在标题栏正上方，从下往上排。
+    """
+    tpl = template if (template and os.path.isfile(template)) else BOM_TEMPLATE
+    pw, ph = PAPER_SIZE_M.get(str(paper).upper(), (0.420, 0.297))
+    if not landscape:
+        pw, ph = ph, pw
+
+    # 第一个实体视图（跳过图纸本身）
+    view = None
+    v = dw.GetFirstView
+    i = 0
+    while v is not None and i < 10:
+        if i > 0:
+            view = v
+            break
+        v = v.GetNextView
+        i += 1
+    if view is None:
+        return {'ok': False, 'error': '没有可用视图，无法插入明细表'}
+
+    # 标题栏上方、靠右。
+    # ⚠ AnchorType=3(右下) 时 X 给的是**左下角**，明细表会从 X 向右铺，
+    # 给 315mm 就直接伸出图框（实测 PDF 宽度 483mm > 420）。
+    # 所以 X 要按「表格宽度 」往回让：GB 明细表约 180mm 宽。
+    x = max(0.030, pw - 0.185)
+    y = 0.075
+    try:
+        tbl = view.InsertBomTable3(False, x, y, int(anchor), int(bom_type),
+                                   '', tpl, False)
+    except Exception as exc:
+        return {'ok': False, 'error': f'{type(exc).__name__}: {exc}',
+                'template': tpl}
+
+    if tbl is None:
+        return {'ok': False, 'error': 'InsertBomTable3 返回空',
+                'template': tpl}
+
+    rows = None
+    try:
+        rows = int(tbl.RowCount)
+    except Exception:
+        pass
+    return {'ok': True, 'template': tpl, 'atMm': [round(x * 1000, 1),
+                                                  round(y * 1000, 1)],
+            'rows': rows}
+
+
 def open_model(sw, path):
+    """按扩展名用正确的文档类型打开。
+
+    ⚠ 踩过的坑：原来只区分 `.sldasm` 和「其它一律当零件」，
+    结果打开 `.SLDDRW` 时用零件类型去开，返回 None，
+    报错只是 AttributeError: 'NoneType' object has no attribute 'GetTitle'。
+    """
     from win32com.client import VARIANT
     from pythoncom import VT_BYREF, VT_I4
     ext = os.path.splitext(path)[1].lower()
-    doc_type = SW_DOC_ASSEMBLY if ext == '.sldasm' else SW_DOC_PART
+    if ext == '.sldasm':
+        doc_type = SW_DOC_ASSEMBLY
+    elif ext == '.slddrw':
+        doc_type = SW_DOC_DRAWING
+    else:
+        doc_type = SW_DOC_PART
     errs = VARIANT(VT_BYREF | VT_I4, 0)
     warns = VARIANT(VT_BYREF | VT_I4, 0)
     doc = sw.OpenDoc6(path, doc_type, 1, '', errs, warns)
@@ -2260,6 +2335,15 @@ def build(payload):
         raise RuntimeError(f'打开模型失败 err={err} warn={warn}: {model}')
     emit({'stage': 'model_opened', 'err': err, 'warn': warn})
 
+    # 装配体要走装配图流程：多了明细表（BOM）和零件序号
+    is_assembly = os.path.splitext(model)[1].lower() == '.sldasm'
+    if is_assembly:
+        try:
+            comps = int(doc_model.GetComponentCount(0))
+        except Exception:
+            comps = 0
+        emit({'stage': 'assembly', 'components': comps})
+
     # 判定模型类型：参数化模型 vs STEP/IGES 导入实体。
     # 两者自动标注能力天差地别——导入实体没有设计尺寸，
     # InsertModelAnnotations3 插不出东西（实测 144面/450边/0草图的零件
@@ -2403,6 +2487,22 @@ def build(payload):
                       'strategy': 'spread_outside' if used_spread else 'gb_layout'})
         except Exception as exc:
             emit({'stage': 'views_positioned', 'error': str(exc)})
+
+    # ── 装配体：插入明细表（BOM）──
+    # 装配图比零件图多两样东西：明细表 + 零件序号。
+    # 明细表 API 的坑（实测 2026-11）：IView::InsertBomTable3 的第一个参数
+    # 是 **UseAnchorPoint(bool)**，不是模板路径 —— 照老签名把模板路径塞第一个
+    # 位置会报「类型不匹配。 (None, 1)」，很难看出来。
+    if is_assembly and payload.get('bom', True):
+        try:
+            bom = insert_bom_table(dw, paper, landscape,
+                                   payload.get('bomTemplate') or BOM_TEMPLATE,
+                                   anchor=int(payload.get('bomAnchor', 3)),
+                                   bom_type=int(payload.get('bomType', 1)))
+            emit({'stage': 'bom', **bom})
+        except Exception as exc:
+            emit({'stage': 'bom', 'ok': False,
+                  'error': f'{type(exc).__name__}: {exc}'})
 
     # ── 让视图显示隐藏线（内部结构以虚线导出）──
     # 用户要求：出「能看到内部」的视图。
