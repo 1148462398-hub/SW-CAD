@@ -8,6 +8,35 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.9.6（当前）
+
+**软件启动路径也改成浏览选择**（用户要求：SolidWorks / AutoCAD 的 exe 也要
+用资源管理器那种方式选，不要手打）。
+
+- `POST /api/pick-file` 新增 `kind` 参数：`model` / `exe` / `all`
+- 面板「软件启动路径」两行各加「浏览…」按钮，弹原生 `OpenFileDialog`，
+  过滤器 `可执行程序|*.exe`，初始目录取自动探测到的安装目录
+- 现在面板一共有 3 个「浏览…」：SolidWorks / AutoCAD / 输出目录
+
+**顺带修掉两个 PowerShell 中文坑（都是实测踩的）**
+
+1. **必须用 `-EncodedCommand`，不能用 `-Command`**：
+   `-Command` 按控制台代码页解码参数，脚本里的中文（对话框标题、文件筛选器）
+   会变成乱码，PowerShell 直接报
+   「表达式或语句中包含意外的标记」/「字符串缺少终止符」。
+   改成 `Buffer.from(ps, 'utf16le').toString('base64')` + `-EncodedCommand`。
+
+2. **必须设 `[Console]::OutputEncoding = UTF8`**：
+   PowerShell 用 OEM 代码页写 stdout，Node 按 UTF-8 读，
+   于是用户选到 `D:\5寸机\自动出图` 这种中文路径时，返回的路径是乱码，
+   后面拼文件路径必然失败。实测加这一行后中文路径完好。
+
+**关于「不依赖 AI 模型」**：插件的出图链路本来就是纯代码——
+面板按钮 → `POST /api/build` → `engine.py` → SolidWorks COM → AutoCAD COM → DXF/DWG，
+全程没有 AI 参与。AI 只在用户于对话框里下指令时才通过 `cad_draw_build` 工具调它，
+两者是同一条后端。
+
+### v0.9.5
 ### v0.9.5（当前）
 
 **只保留一套标注：全部交给 AutoCAD，SolidWorks 不再插模型尺寸。**
