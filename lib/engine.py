@@ -1099,16 +1099,24 @@ def spread_views_outside(doc, paper, landscape, gap_factor=1.8, margin_m=0.040):
     x = margin_m
 
     placed = {}
+    # ★ 先把**所有**视图的对齐约束一次性解除，再统一摆位置。
+    # 原来是在循环里「移一个解一个」，结果：移前一个视图时，后一个视图
+    # 还带着「长对正/高平齐」约束，SolidWorks 会把前一个拉回去 ——
+    # 实测俯视图设到 x=313.5，GetOutline 仍报 x=74，两个视图重合。
+    # 用户也指出「是不是忘了在 SW 那要解除对齐关系，然后再在 CAD 里重新对齐」。
     for t in items:
-        tx = x + t['w'] / 2.0
-        # ⚠ 必须先解除投影对齐（长对正/高平齐）再设位置。
-        # Create1stAngleViews2 建的视图带对齐约束，直接 Position 会被
-        # 拉回去：实测俯视图设到 x=313.5，GetOutline 仍报 x=74，
-        # 图面上两个视图重合在一起。IView.RemoveAlignment 是解开它的钥匙。
         try:
             t['view'].RemoveAlignment()
         except Exception:
             pass
+        # 双保险：显式关掉与父视图的对齐关系
+        try:
+            t['view'].SetAlignment(0, False)
+        except Exception:
+            pass
+
+    for t in items:
+        tx = x + t['w'] / 2.0
         ok = False
         try:
             t['view'].Position = arr2(tx, y)
@@ -2805,11 +2813,23 @@ def build(payload):
             bom_result = {'ok': False, 'error': f'{type(exc).__name__}: {exc}'}
             emit({'stage': 'bom', **bom_result})
 
-    # 明细表占了右下角一大块，AutoCAD 搬视图时必须避开它，
-    # 否则视图会被摆到明细表上面（真实装配图实测过）。
-    # 现在直接用明细表的**真实外包围框**（拿不到才用行数估算）。
+    # 右下角永远是标题栏（零件图也有），视图绝不能压进去。
+    # 以前只避让明细表，零件图没有明细表 → 标题栏完全没被保护，
+    # 实测右视图直接压进标题栏（用户截图指出「包围框还是有侵入」）。
     reserved_for_layout = []
     bom_box_mm = None
+    try:
+        _pw, _ph = PAPER_SIZE_M.get(str(paper).upper(), (0.420, 0.297))
+        _pw_mm = _pw * 1000.0 if landscape else _ph * 1000.0
+        _ph_mm = _ph * 1000.0 if landscape else _pw * 1000.0
+        # GB 标题栏：右下角，宽约 180mm、高约 56mm
+        reserved_for_layout.append(
+            (max(0.0, _pw_mm - 182.0), 0.0, _pw_mm - 2.0, 58.0))
+        emit({'stage': 'title_reserved',
+              'rectMm': [round(v, 1) for v in reserved_for_layout[0]]})
+    except Exception as exc:
+        emit({'stage': 'title_reserved', 'error': str(exc)})
+
     if bom_result and bom_result.get('ok'):
         try:
             box = bom_result.get('boxMm')
