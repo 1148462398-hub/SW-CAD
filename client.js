@@ -167,6 +167,18 @@ window.__ModuleLoader__.load({
         textShadow: 'none',
         whiteSpace: 'nowrap'
       }),
+      /* 小号次要按钮（「恢复默认」「检测路径」这类） */
+      btnGhost: {
+        padding: '4px 10px',
+        fontSize: 12,
+        fontWeight: 500,
+        borderRadius: 6,
+        border: '1px solid var(--dsw-alias-border-secondary, #d0d0d0)',
+        background: 'transparent',
+        color: 'inherit',
+        cursor: 'pointer',
+        whiteSpace: 'nowrap'
+      },
       fileChip: {
         display: 'inline-flex',
         alignItems: 'center',
@@ -391,9 +403,19 @@ window.__ModuleLoader__.load({
             setLog('正在调用 SolidWorks 出图，单件约 1–4 分钟，请勿重复点击…\n')
           }
 
+          /* 输出目录：用户没填就自动建一个「出图_<模型名>」，
+             并把最终路径写进日志，避免「不知道存哪去了」。 */
+          let outDir = (form.outDir || '').trim()
+          if (!outDir) {
+            const dir = modelPath.replace(/[\\/][^\\/]+$/, '')
+            const base = String(file.name || 'model').replace(/\.[^.]+$/, '')
+            outDir = dir + '\\出图_' + base
+          }
+          setLog((prev) => prev + `输出目录：${outDir}\n\n`)
+
           const payload = {
             model: modelPath,
-            outDir: '',
+            outDir,
             paperSize: form.paperSize,
             annotationStandard: form.annotationStandard,
             solidworksExe: form.solidworksExe || '',
@@ -866,6 +888,30 @@ window.__ModuleLoader__.load({
           ),
 
           /* 输出 */
+          /* 保存位置 */
+          h('div', { style: styles.sectionTitle }, '保存位置'),
+          h(Field, { label: '输出目录' },
+            h('input', {
+              style: styles.input,
+              placeholder: '留空 = 模型旁边的「出图_模型名」文件夹；也可填绝对路径',
+              value: form.outDir,
+              onChange: (e) => set('outDir', e.target.value)
+            })
+          ),
+          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', margin: '2px 0 4px 84px' } },
+            h('button', {
+              type: 'button',
+              style: { ...styles.btnGhost, padding: '3px 10px', fontSize: 12 },
+              onClick: () => set('outDir', '')
+            }, '恢复默认（模型旁）'),
+            file && h('span', { style: { fontSize: 11, opacity: 0.7 } },
+              '会存到：' + (
+                form.outDir.trim()
+                  ? form.outDir.trim()
+                  : '(模型所在目录)\\出图_' + String(file.name || 'model').replace(/\.[^.]+$/, '')
+              ))
+          ),
+
           h('div', { style: styles.sectionTitle }, '输出格式'),
           h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, marginBottom: 4 } },
             h('label', { style: styles.check },
