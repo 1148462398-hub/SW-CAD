@@ -3052,6 +3052,23 @@ def build(payload):
             emit({'stage': 'acad_post_error', 'error': str(exc),
                   'type': type(exc).__name__})
 
+        # ★ AutoCAD 加工完，重新导出 DXF ★
+        # 用户明确指出：「开始出图应该是输出 AutoCAD 画的 dxf 文件」。
+        # SolidWorks 导出的那份 DXF 是加工**之前**的（没标注、视图没搬进图框、
+        # 没中心线），必须在这里用 AutoCAD 另存覆盖掉，否则用户拿到的
+        # DXF 里什么都看不到（他以为「AutoCAD 里啥都没有」）。
+        if out_dwg and payload.get('exportDxf', True) and out_dxf:
+            try:
+                from acad_plot import export_dxf_from_dwg
+                re_dxf = export_dxf_from_dwg(
+                    out_dwg, out_dxf,
+                    exe_hint=payload.get('autocadExe'),
+                    log=lambda m: emit({'stage': 'acad_redxf_log', 'msg': m}))
+                emit({'stage': 'acad_redxf', **re_dxf})
+            except Exception as exc:
+                emit({'stage': 'acad_redxf', 'ok': False,
+                      'error': f'{type(exc).__name__}: {exc}'})
+
         # 用完就关：AutoCAD 里这个 DWG 已经不需要了，留着只是占内存。
         # 用户要求「打开过的界面如果后续用不上了，就顺带关掉」。
         # 只关本文档，不动 AutoCAD 进程，也不碰用户自己开的图。
