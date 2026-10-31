@@ -97,14 +97,24 @@ def _vec(t):
     return VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, tuple(vals))
 
 
-def connect_acad(visible=False, timeout=120):
+def connect_acad(visible=False, timeout=120, exe_hint=None):
     """连上 AutoCAD，并等到 Documents 集合真正可用。
 
     实测坑：Dispatch 成功后立刻 acad.Documents.Open 会报
     AttributeError '<unknown>.Open' —— 因为 AutoCAD 还在启动，
     Documents 集合尚未暴露。必须轮询到它能列出为止。
+
+    exe_hint：面板里配的 acad.exe 路径；没在跑就按这个路径拉起来。
     """
     import win32com.client as win32
+
+    # 先确保进程在跑（按用户指定的路径启动，找不到就退回直接 Dispatch）
+    try:
+        import apps
+        apps.ensure_running(apps.AUTOCAD, exe_hint)
+    except Exception:
+        pass
+
     start = time.time()
     acad = None
     while time.time() - start < timeout:
@@ -1653,9 +1663,10 @@ def auto_dimension(doc, opts=None):
     return stats
 
 
-def dimension_dwg(dwg_path, opts=None, visible=False, out_path=None):
+def dimension_dwg(dwg_path, opts=None, visible=False, out_path=None, exe_hint=None):
     """打开 DWG，建国标样式，自动标注，另存。"""
-    acad = connect_acad(visible)
+    opts = opts or {}
+    acad = connect_acad(visible, exe_hint=exe_hint or opts.get('autocadExe'))
     doc = open_doc(acad, dwg_path)
     try:
         # 自动标注要在模型空间做
