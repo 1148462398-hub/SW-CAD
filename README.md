@@ -8,6 +8,53 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.9.9（当前）
+
+**找到面板接口「请求一直挂着」的根因：路由压根没注册上。**
+
+排查过程（值得记下来）：
+
+1. 用户截图：`dsh-app://app/dsh-cad-draw/api/probe` →
+   `net::ERR_UNEXPECTED`；`pick-file` → 404。
+2. 查 DSH 桌面端 `protocol.handle(SCHEME)` 源码，确认 `dsh-app://app/*`
+   除前端资源外**全部带鉴权 cookie 转发给宿主 HTTP**
+   （`return forwardWebRequest(request, hostUrl, hostCookie)`）。
+   → 所以**相对路径本来就是对的**，我上一版改成
+   `http://127.0.0.1:<端口>` 是错的方向，已回滚。
+   （实测宿主 `/` 需要鉴权，直接访问返回 401 / ERR_FAILED，
+   但插件自己的 `/dsh-cad-draw/api/*` 路由是通的。）
+3. 直接请求 `/dsh-cad-draw/api/progress` 和 `/api/probe`，
+   **两个都超时**（`/` 却秒回 401）→ 说明 HTTP 服务活着，
+   但请求进了宿主后没有任何响应。
+4. 同一时刻调插件工具 `cad_draw_probe`：**1 秒返回**，
+   两个路径都探测到了 → 宿主和引擎完全正常，**只是路由没挂上**。
+
+根因：我用的是 `ctx.get('webServer')` 200ms 轮询（取不到就重试），
+在桌面 profile 下始终取不到，路由永远没注册。
+DSH 自己的插件（client-modules / client-connection）都是官方写法：
+
+```js
+ctx.inject(['webServer'], (webCtx) => {
+  webCtx.effect(() => webCtx.webServer.register({
+    kind: 'prefix', path, handler
+  }), 'label')
+})
+```
+
+改成这个写法后，离线自检确认两条路由都注册成功：
+
+```
+ctx.inject 调用, deps = ["webServer"]
+工具数: 5
+注册的路由: ["/dsh-cad-draw","/api/dsh-cad-draw"]
+```
+
+另外加了一条**别名路由** `/api/dsh-cad-draw`：万一桌面端只转发 `/api/*`
+前缀，这个别名能保证接口仍然可达。
+
+⚠ 这个改动在 `lib/api.js`（宿主侧），**必须重启 DSH** 才生效。
+
+### v0.9.8
 ### v0.9.8（当前）
 
 **找到「探测不到 / 浏览加不进去」的真正原因：桌面端的 URL 协议不对。**
