@@ -272,9 +272,44 @@ def insert_bom_table(dw, paper, landscape=True, template=None,
         rows = int(tbl.RowCount)
     except Exception:
         pass
-    return {'ok': True, 'template': tpl, 'atMm': [round(x * 1000, 1),
-                                                  round(y * 1000, 1)],
-            'rows': rows}
+
+    # 取明细表的**真实外包围框**（米 → 毫米）。
+    # 用户思路：「BOM 也是包围框的思路，给外边缘做包围框，
+    # 然后 BOM 独立图层，避免和工程图图框以及视图重叠」。
+    box_mm = None
+    for getter in ('BoundingBox', 'GetBoundingBox'):
+        try:
+            bb = getattr(tbl, getter)
+            if bb is None:
+                continue
+            # 可能是 (x0,y0,z0,x1,y1,z1) 或 ((x0,y0,z0),(x1,y1,z1))
+            try:
+                x0, y0, _z0, x1, y1, _z1 = bb
+            except Exception:
+                x0, y0 = bb[0][0], bb[0][1]
+                x1, y1 = bb[1][0], bb[1][1]
+            box_mm = [round(float(min(x0, x1)) * 1000, 1),
+                      round(float(min(y0, y1)) * 1000, 1),
+                      round(float(max(x0, x1)) * 1000, 1),
+                      round(float(max(y0, y1)) * 1000, 1)]
+            break
+        except Exception:
+            continue
+
+    # 拿不到真实框就用行数估算（GB 行高约 7mm）
+    if not box_mm:
+        est_h = (rows or 8) * 7.0 + 12.0
+        box_mm = [round(x * 1000, 1), round(y * 1000, 1),
+                  round(x * 1000 + 180, 1), round(y * 1000 + est_h, 1)]
+        box_estimated = True
+    else:
+        box_estimated = False
+
+    return {'ok': True, 'template': tpl,
+            'atMm': [round(x * 1000, 1), round(y * 1000, 1)],
+            'rows': rows,
+            'boxMm': box_mm,
+            'boxEstimated': box_estimated}
 
 
 def assembly_components(asm_doc):
@@ -408,7 +443,15 @@ def insert_balloons(dw, layout=1, style=1, size=2,
         return {'ok': False, 'error': f'{type(exc).__name__}: {exc}',
                 'selected': selected}
 
-    return {'ok': bool(r), 'selected': selected, 'result': r,
+    # ⚠ AutoBalloon4 返回的是 COM 对象数组，直接放进结果里会在
+    # json.dumps 时炸「Object of type CDispatch is not JSON serializable」。
+    # 这里只留数量。
+    try:
+        count = len(r) if r is not None else 0
+    except Exception:
+        count = 1 if r else 0
+
+    return {'ok': bool(count), 'selected': selected, 'created': count,
             'views': len(targets)}
 
 
@@ -2479,6 +2522,19 @@ def build(payload):
             comps = 0
         emit({'stage': 'assembly', 'components': comps})
 
+        # 自动升图幅：零件一多，明细表就有十几行，A3 上
+        # 「视图 + 明细表 + 标题栏」根本放不下（实测 12 个零件时
+        # 明细表 180×103mm，剩下的空间装不进 102×126 的视图，
+        # 布局只能 clamped）。这时把 A3 自动升到 A2。
+        _req_paper = str(payload.get('paperSize') or 'A3').upper()
+        if (_req_paper == 'A3' and comps >= 10
+                and payload.get('autoPaperSize', True)):
+            payload = {**payload, 'paperSize': 'A2'}
+            emit({'stage': 'paper_escalated',
+                  'from': 'A3', 'to': 'A2', 'components': comps,
+                  'note': f'零件 {comps} 个，A3 放不下明细表+视图，已自动升到 A2'})
+
+
     # 判定模型类型：参数化模型 vs STEP/IGES 导入实体。
     # 两者自动标注能力天差地别——导入实体没有设计尺寸，
     # InsertModelAnnotations3 插不出东西（实测 144面/450边/0草图的零件
@@ -2640,6 +2696,35 @@ def build(payload):
         except Exception as exc:
             bom_result = {'ok': False, 'error': f'{type(exc).__name__}: {exc}'}
             emit({'stage': 'bom', **bom_result})
+
+    # 明细表占了右下角一大块，AutoCAD 搬视图时必须避开它，
+    # 否则视图会被摆到明细表上面（真实装配图实测过）。
+    # 现在直接用明细表的**真实外包围框**（拿不到才用行数估算）。
+    reserved_for_layout = []
+    bom_box_mm = None
+    if bom_result and bom_result.get('ok'):
+        try:
+            box = bom_result.get('boxMm')
+            if box:
+                bom_box_mm = box
+                reserved_for_layout.append(
+                    (box[0] - 6.0, box[1] - 4.0, box[2] + 4.0, box[3] + 10.0))
+            else:
+                rows = int(bom_result.get('rows') or 8)
+                bx = float(bom_result['atMm'][0])
+                by = float(bom_result['atMm'][1])
+                pw_mm = PAPER_SIZE_M.get(str(paper).upper(), (0.420, 0.297))[0] * 1000.0
+                if not landscape:
+                    pw_mm = PAPER_SIZE_M.get(str(paper).upper(), (0.420, 0.297))[1] * 1000.0
+                bom_box_mm = [bx, by, pw_mm - 5.0, by + rows * 7.0 + 14.0]
+                reserved_for_layout.append(
+                    (bx - 6.0, by - 4.0, pw_mm - 2.0, bom_box_mm[3] + 10.0))
+            emit({'stage': 'bom_reserved',
+                  'rectMm': [round(v, 1) for v in reserved_for_layout[0]],
+                  'bomBoxMm': bom_box_mm,
+                  'estimated': bool(bom_result.get('boxEstimated'))})
+        except Exception as exc:
+            emit({'stage': 'bom_reserved', 'error': str(exc)})
 
     # ── 装配体：零件序号（气泡）──
     # 必须在明细表之后、保存之前做；有明细表时气泡编号才能和表里的「项目」对上。
@@ -2943,6 +3028,12 @@ def build(payload):
             # 只有「已经把视图摊到框外」时才让 AutoCAD 搬回框内；
             # 视图本来就在框内（gb_layout）就别再搬一次，否则会压到标题栏上。
             opts.setdefault('moveViews', used_spread)
+            # 明细表/标题栏占的区域：交给 AutoCAD 布局时避开
+            if reserved_for_layout:
+                opts.setdefault('reservedRects', reserved_for_layout)
+            # 明细表外包围框：AutoCAD 用它把表格图元划到 DSH_BOM 独立图层
+            if bom_box_mm:
+                opts.setdefault('bomBoxMm', bom_box_mm)
             if want_acad:
                 acad_dim_result = acad_dimension.dimension_dwg(
                     out_dwg, opts,
