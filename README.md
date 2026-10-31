@@ -8,6 +8,18 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.6.4（当前）
+
+- **出图进度条** —— 面板「开始出图」下面显示百分比进度。
+  `/api/build` 是跑完才返回的，所以新增 `GET /api/progress`，
+  引擎每吐一个阶段就更新内存里的进度（`engine.js` 里 40+ 个阶段的百分比映射），
+  面板每 800ms 轮询一次画进度条；完成 100%，失败停在出错那一步并标红。
+- **用完就关** —— 模型零件导出后立即在 SolidWorks 里关掉（`model_closed` 阶段），
+  AutoCAD 里的 DWG 标注完也关掉（`acad_closed` 阶段）。
+  只关本文档，不动进程，也不碰用户自己开的图。可用
+  `closeModelAfter` / `closeAcadAfter` 关掉这个行为。
+
+### v0.6.3
 ### v0.6.3（当前）
 
 - **修 `name 'ensure_running' is not defined`** —— `engine.py` 的 `connect()` 调用少写了模块前缀，
