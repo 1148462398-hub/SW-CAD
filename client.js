@@ -308,14 +308,53 @@ window.__ModuleLoader__.load({
     }
 
     /* ---------------- 主面板 ---------------- */
+    /* 表单持久化：插件热更新 / 页面刷新 / 组件重挂载 都不能把用户填的路径弄丢。
+       用户报过「2 个软件启动路径我添加了也加不进去」——本质就是 state 没存住。 */
+    const LS_FORM = 'dsh-cad-draw.form'
+    const LS_PROBE = 'dsh-cad-draw.probe'
+
+    function lsGet(key, fallback) {
+      try {
+        const s = window.localStorage.getItem(key)
+        if (!s) return fallback
+        const v = JSON.parse(s)
+        return v && typeof v === 'object' ? v : fallback
+      } catch {
+        return fallback
+      }
+    }
+
+    function lsSet(key, value) {
+      try {
+        window.localStorage.setItem(key, JSON.stringify(value))
+      } catch {
+        /* 隐私模式等存不了，忽略 */
+      }
+    }
+
     function CadPanel() {
-      const [rawForm, setForm] = useState(defaultForm)
+      /* ⚠ defaultForm 是**函数**（useState(defaultForm) 走的是 lazy initializer）。
+         所以任何地方要它的值都必须 `defaultForm()` 调用。
+         本鱼以前写成 `{ ...defaultForm, ...rawForm }` —— 展开一个函数得到 {}，
+         所有默认字段（含 views）全丢，面板直接崩/输入框回填失败。
+         统一用这个常量，别再直接展开 defaultForm。 */
+      const DEFAULTS = defaultForm()
+
+      const [rawForm, setForm] = useState(() => {
+        const saved = lsGet(LS_FORM, {})
+        const merged = { ...defaultForm(), ...saved }
+        /* 数组类字段要保证是数组，别被坏数据带崩 */
+        if (!Array.isArray(merged.views) || !merged.views.length) {
+          merged.views = defaultForm().views
+        }
+        return merged
+      })
       /* ★ 每次渲染都合并一次默认值。
          原因：插件热更新（或改了 defaultForm 加了新字段）时，
          useState 里保存的还是**旧对象**，里面没有新字段。
          任何 form.newField.xxx 都会 undefined 崩掉整个面板（黑屏）。
          这里统一兜底，新增字段再也不会炸。 */
-      const form = { ...defaultForm, ...rawForm }
+      const form = { ...DEFAULTS, ...rawForm }
       const [file, setFile] = useState(null)
       /* 用原生对话框选出来的**原始绝对路径**。
          装配体必须走这条路：拖拽只能拿到字节，复制到 uploads 后
@@ -328,13 +367,21 @@ window.__ModuleLoader__.load({
       // 出图进度：{active, percent, label, stage, error}
       const [progress, setProgress] = useState(null)
       // 自动探测到的启动路径（打开面板就跑一次，直接显示在输入框下面）
-      const [detected, setDetected] = useState({
-        solidworks: null, autocad: null, python: '', revision: '', error: ''
+      // 结果也缓存，重挂载时先用缓存渲染，避免「一直是空白」的错觉
+      const [detected, setDetected] = useState(() => {
+        const c = lsGet(LS_PROBE, null)
+        return c || { solidworks: null, autocad: null, python: '', revision: '', error: '' }
       })
       const [pdfPath, setPdfPath] = useState('')
       const [log, setLog] = useState('')
       const [result, setResult] = useState(null)
       const inputRef = useRef(null)
+
+      /* 表单变化就落盘（防抖 300ms，避免每敲一个字母写一次） */
+      useEffect(() => {
+        const t = setTimeout(() => lsSet(LS_FORM, rawForm), 300)
+        return () => clearTimeout(t)
+      }, [rawForm])
 
       const set = useCallback((key, value) => {
         setForm((prev) => ({ ...prev, [key]: value }))
@@ -609,13 +656,15 @@ window.__ModuleLoader__.load({
           if (!json?.info || json.info.error) {
             throw new Error(json?.info?.error || json?.error || '接口返回异常')
           }
-          setDetected({
+          const next = {
             solidworks: p.solidworks || null,
             autocad: p.autocad || null,
             python: json?.info?.python || '',
             revision: json?.info?.solidworks?.revision || '',
             error: ''
-          })
+          }
+          setDetected(next)
+          lsSet(LS_PROBE, next)
           if (!detectOnly) {
             const lines = []
             for (const [k, label] of [['solidworks', 'SolidWorks'], ['autocad', 'AutoCAD']]) {
