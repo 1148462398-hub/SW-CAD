@@ -8,6 +8,52 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.9.8（当前）
+
+**找到「探测不到 / 浏览加不进去」的真正原因：桌面端的 URL 协议不对。**
+
+用户 DevTools 截图给出了决定性证据：
+
+```
+Failed to load resource: net::ERR_UNEXPECTED
+  dsh-app://app/dsh-cad-draw/api/probe
+  dsh-app://app/dsh-cad-draw/api/pick-file   → 404
+```
+
+桌面应用的页面来源是 `dsh-app://app/`，而我们写的是相对路径
+`API = '/dsh-cad-draw'`。于是请求被解析成
+`dsh-app://app/dsh-cad-draw/api/probe` —— **桌面协议不转发插件注册的 HTTP 路由**：
+- GET `/api/probe` → `net::ERR_UNEXPECTED`（协议层直接失败）
+- POST `/api/pick-file` → 404
+
+所以这两个按钮怎么点都没反应。**和 `defaultForm` 那个 bug 是两个独立问题**，
+上一版修的是状态，这一版修的是传输。
+
+实测宿主 HTTP 端口还带鉴权（未带凭证直接请求返回 **401**），
+所以桌面端也无法简单拼绝对地址。
+
+**改法**
+
+`resolveApi()` 按来源自动选基地址：
+
+| 页面来源 | 用的基地址 | 说明 |
+|---|---|---|
+| `http(s)://` | 同源 `/dsh-cad-draw` | 浏览器里打开 GUI，最稳，同源免鉴权 |
+| `dsh-app://` 且 boot 里有端口 | `http://127.0.0.1:<端口>/dsh-cad-draw` | 自动挖端口 |
+| `dsh-app://` 且挖不到端口 | 面板顶部显示**红色提示** | 告诉用户改用浏览器地址 |
+
+**当前正确用法：把 `http://127.0.0.1:<端口>` 复制到浏览器打开**，
+在那个页面里用「CAD 出图」面板 —— 同源请求，探测 / 浏览 / 出图都能通。
+
+三种环境实测（mock React 真实渲染）：
+
+```
+浏览器 (http):              144 节点  警告横幅=false
+桌面端 dsh-app + boot含端口: 144 节点  警告横幅=false
+桌面端 dsh-app + boot无端口: 152 节点  警告横幅=true
+```
+
+### v0.9.7
 ### v0.9.7（当前）
 
 **修「软件启动路径添加不进去 + 自动探测半天没结果」。**
