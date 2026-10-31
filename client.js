@@ -304,11 +304,30 @@ window.__ModuleLoader__.load({
       const build = useCallback(async () => {
         if (!file) return
         setBusy(true)
-        setLog('正在调用 SolidWorks 出图，单件约 1–4 分钟，请勿重复点击…\n')
         setResult(null)
         try {
+          /* 浏览器里 File 对象没有本地路径（file.path 只有 Electron 才有），
+             必须先把字节传到后端落盘，拿到绝对路径再出图。
+             Electron/桌面端若已有 file.path 就跳过上传，省一次拷贝。 */
+          let modelPath = file.path || ''
+          if (!modelPath) {
+            setLog('正在上传模型到本机…\n')
+            const up = await fetch(
+              API + '/api/upload?name=' + encodeURIComponent(file.name),
+              { method: 'POST', body: file }
+            )
+            const upJson = await up.json()
+            if (!upJson?.ok || !upJson.path) {
+              throw new Error('上传失败：' + (upJson?.error || '后端没有返回路径'))
+            }
+            modelPath = upJson.path
+            setLog(`模型已存到：${modelPath}\n\n正在调用 SolidWorks 出图，单件约 1–4 分钟，请勿重复点击…\n`)
+          } else {
+            setLog('正在调用 SolidWorks 出图，单件约 1–4 分钟，请勿重复点击…\n')
+          }
+
           const payload = {
-            model: file.path || file.name,
+            model: modelPath,
             outDir: '',
             paperSize: form.paperSize,
             annotationStandard: form.annotationStandard,
