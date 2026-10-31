@@ -55,9 +55,19 @@ def emit(obj):
     sys.stdout.flush()
 
 
-def connect_acad(visible=False, timeout=120):
-    """连到 AutoCAD；没有运行就启动一个（默认隐藏，不打扰前端）。"""
+def connect_acad(visible=False, timeout=120, exe_hint=None):
+    """连到 AutoCAD；没有运行就启动一个（默认隐藏，不打扰前端）。
+
+    exe_hint：面板里配的 acad.exe 路径；没在跑就按这个路径拉起来。
+    """
     import win32com.client as win32
+
+    try:
+        import apps
+        apps.ensure_running(apps.AUTOCAD, exe_hint)
+    except Exception:
+        pass
+
     start = time.time()
     acad = None
     while time.time() - start < timeout:
@@ -144,14 +154,16 @@ def match_field(text, x, y, paper_scale=1.0):
     return None
 
 
-def edit_title_block(dwg_path, fields, out_path=None, visible=False, keep_open=False):
+def edit_title_block(dwg_path, fields, out_path=None, visible=False, keep_open=False,
+                     exe_hint=None):
     """改写 DWG 标题栏。
 
     fields: {'material': '6061-T6', 'title': 'xxx', 'number': 'DW-001', ...}
     keep_open: False = 改完退出 AutoCAD（默认，避免进程堆积）
+    exe_hint: 面板里配的 acad.exe 路径
     返回 {ok, changed: [{field, old, new}], skipped: [field], out, quit}
     """
-    acad = connect_acad(visible)
+    acad = connect_acad(visible, exe_hint=exe_hint)
     doc = acad.Documents.Open(os.path.abspath(dwg_path))
     quit_ok = None
     try:
