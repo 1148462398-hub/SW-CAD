@@ -309,7 +309,13 @@ window.__ModuleLoader__.load({
 
     /* ---------------- 主面板 ---------------- */
     function CadPanel() {
-      const [form, setForm] = useState(defaultForm)
+      const [rawForm, setForm] = useState(defaultForm)
+      /* ★ 每次渲染都合并一次默认值。
+         原因：插件热更新（或改了 defaultForm 加了新字段）时，
+         useState 里保存的还是**旧对象**，里面没有新字段。
+         任何 form.newField.xxx 都会 undefined 崩掉整个面板（黑屏）。
+         这里统一兜底，新增字段再也不会炸。 */
+      const form = { ...defaultForm, ...rawForm }
       const [file, setFile] = useState(null)
       const [over, setOver] = useState(false)
       const [busy, setBusy] = useState(false)
@@ -894,7 +900,7 @@ window.__ModuleLoader__.load({
             h('input', {
               style: styles.input,
               placeholder: '留空 = 模型旁边的「出图_模型名」文件夹；也可填绝对路径',
-              value: form.outDir,
+              value: form.outDir || '',
               onChange: (e) => set('outDir', e.target.value)
             })
           ),
@@ -904,10 +910,13 @@ window.__ModuleLoader__.load({
               style: { ...styles.btnGhost, padding: '3px 10px', fontSize: 12 },
               onClick: () => set('outDir', '')
             }, '恢复默认（模型旁）'),
+            // ⚠ 这里所有 form.xxx 都要兜底：面板热更新时旧的 useState
+            //   还带着「没有新字段」的 form，直接 .trim() 会抛
+            //   TypeError，把整个面板渲染崩成黑屏（踩过一次）。
             file && h('span', { style: { fontSize: 11, opacity: 0.7 } },
               '会存到：' + (
-                form.outDir.trim()
-                  ? form.outDir.trim()
+                String(form.outDir || '').trim()
+                  ? String(form.outDir || '').trim()
                   : '(模型所在目录)\\出图_' + String(file.name || 'model').replace(/\.[^.]+$/, '')
               ))
           ),
