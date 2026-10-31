@@ -461,6 +461,51 @@ def draw_centerlines(doc, view_layers, extend=3.0, dedup_tol=0.5):
     return {'ok': made > 0, 'lines': made, 'centers': len(seen)}
 
 
+def normalize_lineweights(doc, view_layers):
+    """把视图里的线宽按规定归一到 GB 的粗细搭配。
+
+    GB/T 4457.4：粗实线 b、细实线 b/2，两者比例 **2:1**。
+    SolidWorks 导出的轮廓线是 0.70mm，而我们细线用 0.25mm，
+    比例 2.8:1 —— 打印出来粗细对比过头，图纸显得发毛。
+    这里统一成 b=0.50 / 细=0.25。
+
+    规则：
+      · 视图图层上的 Continuous（可见轮廓）→ 粗实线 0.50
+      · HIDDEN（不可见轮廓）/ CENTER（中心线）→ 细线 0.25
+      · 已经是 0.25 的不动
+    """
+    ms = doc.ModelSpace
+    changed = 0
+    for i in range(ms.Count):
+        try:
+            e = ms.Item(i)
+            if str(e.Layer) not in view_layers:
+                continue
+            onm = str(e.ObjectName)
+            if onm not in ('AcDbLine', 'AcDbCircle', 'AcDbArc', 'AcDbPolyline',
+                           'AcDbEllipse', 'AcDbSpline'):
+                continue
+            lt = str(e.Linetype)
+            try:
+                cur = int(e.Lineweight)
+            except Exception:
+                cur = -1
+            if 'HIDDEN' in lt.upper() or 'CENTER' in lt.upper() or 'DASH' in lt.upper():
+                want = LW_THIN
+            else:
+                want = LW_THICK
+            if cur != want:
+                try:
+                    e.Lineweight = want
+                    changed += 1
+                except Exception:
+                    pass
+        except Exception:
+            continue
+    return {'ok': True, 'changed': changed,
+            'thick': LW_THICK, 'thin': LW_THIN}
+
+
 def _entity_bbox(e, name):
     """求任意图元的包围盒 (x0, y0, x1, y1)。
 
@@ -1494,7 +1539,11 @@ def _dim_one_view(ms, doc, geo, bbox, stats, opts, paper='A3', text_h=3.5):
     strip = dim_footprint(text_h)                   # 紧凑条带厚度
     row_gap = float(opts.get('rowGapMm') or strip * 1.32)
     tol = float(opts.get('tolMm', 0.5))
-    max_linear = int(opts.get('maxLinear', 6))
+    # 线性尺寸上限（每个方向）。装配体只留关键几个：
+    # 装配图本来就不该把每条轮廓边都标一遍（那是零件图的事），
+    # 实测 3 视图 × 2 方向 × 7 个 = 35 个，挤在一起完全没法看。
+    _default_max_linear = 2 if opts.get('assemblyMode') else 6
+    max_linear = int(opts.get('maxLinear') or _default_max_linear)
     dim_circles = bool(opts.get('dimCircles', True))
     show_guide = bool(opts.get('guideBoxes', False))
 
@@ -1595,6 +1644,50 @@ def _dim_one_view(ms, doc, geo, bbox, stats, opts, paper='A3', text_h=3.5):
 
         # 文字要在最外圈之外留出的净距（mm）
         text_clear = max(8.0, text_h * 2.2)
+
+        # ★ 直径去重 + 限数（用户实测：装配图上 62 个直径标注糊成一团黑）
+        #   规则：
+        #     1) 同直径（±0.05mm）的孔只标一处，前面加「N×」
+        #     2) 总数封顶：零件 10 个、装配体 4 个；超出的不标（装配图本来
+        #        就不该把每个孔都标出来，那是零件图的事）
+        #     3) 优先标大孔（外形相关），小孔最后
+        max_d = int(opts.get('maxDiameters')
+                    or (4 if opts.get('assemblyMode') else 10))
+
+        # 按半径归类：{半径key: [组, ...]}
+        by_r = {}
+        for gkey, members in groups.items():
+            max_r0 = max(m[3] for m in members)
+            rk = round(max_r0 * 20) / 20.0     # 0.05mm 一档
+            by_r.setdefault(rk, []).append((gkey, members))
+
+        keep = []          # [(gkey, members, count, prefix)]
+        used = 0
+        for rk in sorted(by_r, reverse=True):     # 大孔优先
+            for gkey, members in by_r[rk]:
+                if used >= max_d:
+                    break
+                cnt = len(by_r[rk])
+                keep.append((gkey, members, cnt))
+                used += 1
+            if used >= max_d:
+                break
+        # 同一半径只保留第一组出标注，其余计数合并到它身上
+        filtered = {}
+        for gkey, members, cnt in keep:
+            rk = round(max(m[3] for m in members) * 20) / 20.0
+            if rk in filtered:
+                filtered[rk][2] += cnt - 1
+            else:
+                filtered[rk] = [gkey, members, cnt]
+        groups = {v[0]: v[1] for v in filtered.values()}
+        dup_count = {v[0]: v[2] for v in filtered.values()}
+        emit({'stage': 'acad_dim_dedup',
+              'groupsTotal': len(by_r),
+              'kept': len(groups),
+              'maxDiameters': max_d,
+              'assemblyMode': bool(opts.get('assemblyMode'))})
+
         # 组按相对视图中心的方位排序，不同圆心的组也朝不同象限散开
         ordered = sorted(
             groups.items(),
@@ -1632,6 +1725,13 @@ def _dim_one_view(ms, doc, geo, bbox, stats, opts, paper='A3', text_h=3.5):
                                             float(lead_len))
                     try: d.Layer = LAYER_DIM
                     except Exception: pass
+                    # 同直径多处：第一处标「4×φ3.40」这种，避免重复标好几十个
+                    try:
+                        cnt = int(dup_count.get((gcx, gcy), 1) or 1)
+                        if cnt > 1 and j == 0:
+                            d.TextOverride = f'{cnt}×<>'
+                    except Exception:
+                        pass
                     stats['diameters'] += 1
                 except Exception:
                     stats['skipped'] += 1
@@ -1803,6 +1903,15 @@ def auto_dimension(doc, opts=None):
             emit({'stage': 'acad_centerlines', **cl})
         except Exception as exc:
             emit({'stage': 'acad_centerlines', 'ok': False,
+                  'error': f'{type(exc).__name__}: {exc}'})
+
+    # ---- 阶段 C3：线宽归一到 GB 粗细搭配（2:1）----
+    if view_layers and opts.get('normalizeLineweight', True):
+        try:
+            lw = normalize_lineweights(doc, list(view_layers) + [LAYER_CENTER])
+            emit({'stage': 'acad_lineweight', **lw})
+        except Exception as exc:
+            emit({'stage': 'acad_lineweight', 'ok': False,
                   'error': f'{type(exc).__name__}: {exc}'})
 
     # 兜底：没有视图边界信息时退回几何聚类
@@ -1994,11 +2103,42 @@ def dimension_dwg(dwg_path, opts=None, visible=False, out_path=None, exe_hint=No
         else:
             doc.SaveAs(target)
 
+        # ★ 在同一会话里直接把加工后的结果导出成 DXF ★
+        # 之前是在外面另开一次 AutoCAD 去 Open(dwg) 再 SaveAs(dxf)，
+        # 但这时文档**已经打开**，拿到的是失效的 COM 对象，报
+        # `<unknown>.SaveAs`、后面连 Count 都读不到。
+        # 现在趁 doc 还活着直接另存，最后再存回 DWG 保住格式。
+        dxf_out = opts.get('dxfPath')
+        dxf_ok = None
+        if dxf_out:
+            dxf_out = os.path.abspath(dxf_out)
+            try:
+                doc.SaveAs(dxf_out, 61)      # 61 = ac2013_dxf
+                dxf_ok = True
+            except Exception:
+                try:
+                    doc.SaveAs(dxf_out)
+                    dxf_ok = True
+                except Exception as exc:
+                    dxf_ok = False
+                    emit({'stage': 'acad_redxf', 'ok': False,
+                          'error': f'{type(exc).__name__}: {exc}'})
+            # 文档关联名已被改成 .dxf，存回 DWG 免得下次打开是 DXF
+            if dxf_ok:
+                try:
+                    doc.SaveAs(target)
+                except Exception:
+                    pass
+                size = os.path.getsize(dxf_out) if os.path.isfile(dxf_out) else 0
+                emit({'stage': 'acad_redxf', 'ok': bool(size),
+                      'dxf': dxf_out, 'size': size})
+
         try:
             doc.Close(False)
         except Exception:
             pass
-        return {'ok': True, 'stats': stats, 'style': style_name, 'out': target}
+        return {'ok': True, 'stats': stats, 'style': style_name,
+                'out': target, 'dxf': dxf_out, 'dxfOk': dxf_ok}
     finally:
         try:
             doc.Close(False)
