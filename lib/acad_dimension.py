@@ -43,12 +43,16 @@ import json
 import traceback
 
 # ---------------- GB 标注样式变量（GB/T 4458.4 + GB/T 14691）----------------
-# 字高 3.5mm 是国标最小推荐值；箭头 ≈ 字高；线宽按 GB 分粗细
+# 字高 3.5mm 是国标最小推荐值；线宽按 GB 分粗细：
+#   粗实线 b = 0.5~0.7（轮廓），细实线 = b/2 ≈ 0.25~0.35（尺寸线/尺寸界线）
+# ⚠ 原来 DIMLWD/DIMLWE 设成 9（0.09mm）——能打印的最细值，但
+#   GB/T 4458.4 要求尺寸线是**细实线 b/2**，0.09 已经细到打印发虚，
+#   和 0.7 的轮廓线配对也不成比例。改成 25（0.25mm）。
 GB_DIM_VARS = {
     'DIMTXT': 3.5,      # 尺寸文字高度 (mm)
-    'DIMASZ': 3.5,      # 箭头大小
-    'DIMEXE': 2.0,      # 尺寸界线超出尺寸线
-    'DIMEXO': 1.0,      # 尺寸界线起点偏移
+    'DIMASZ': 2.5,      # 箭头大小（GB：箭头长约 2.5，约为字高 2/3）
+    'DIMEXE': 2.0,      # 尺寸界线超出尺寸线 2~3mm
+    'DIMEXO': 2.0,      # 尺寸界线离开轮廓 ≥2mm（GB/T 4458.4 明确要求）
     'DIMGAP': 1.0,      # 文字与尺寸线间隙
     'DIMTAD': 1,        # 文字置于尺寸线上方（国标）
     'DIMTIH': 0,        # 尺寸界线内文字水平
@@ -57,19 +61,26 @@ GB_DIM_VARS = {
     'DIMZIN': 8,        # 消除尾随零
     'DIMLFAC': 1.0,     # 线性比例
     'DIMSCALE': 1.0,    # 全局比例
-    'DIMCLRD': 256,     # 尺寸线随层
-    'DIMCLRE': 256,     # 尺寸界线随层
-    'DIMCLRT': 256,     # 文字随层
+    'DIMCLRD': 7,       # 尺寸线 = 白/黑（显式 7，别用 256 ByBlock）
+    'DIMCLRE': 7,       # 尺寸界线
+    'DIMCLRT': 7,       # 文字
+    # ⚠ 原来写 256（ByBlock）。ByBlock 在「无块上下文」的尺寸实体上
+    #   会解析成白色，单色打印（monochrome.ctb）时白字打在白纸上 →
+    #   PDF 里一个字都提取不到，看上去就像「完全没标注」。
+    #   实测：尺寸线/箭头都在，就是没有数字。
     'DIMTDEC': 2,       # 公差小数位
     'DIMTFAC': 1.0,     # 公差文字比例
     'DIMATFIT': 3,      # 箭头/文字都放不下时移出
     'DIMJUST': 0,       # 文字居中
-    # 线宽：GB 里尺寸线/尺寸界线都是细实线，不能被轮廓压住。
-    # AutoCAD 线宽单位 1/100mm，9 = 0.09mm 是能打印的最细值。
-    # 这正是用户要求的「尺寸线宽度默认应该是最细的」。
-    'DIMLWD': 9,        # 尺寸线线宽 0.09mm（最细）
-    'DIMLWE': 9,        # 尺寸界线线宽 0.09mm
+    # 线宽：1/100mm。尺寸线/尺寸界线 = 细实线 0.25mm
+    'DIMLWD': 25,       # 尺寸线线宽 0.25mm（细实线）
+    'DIMLWE': 25,       # 尺寸界线线宽 0.25mm
 }
+
+# GB 线宽搭配：粗实线 0.5、细实线 0.25、细虚线 0.25、细点画线 0.25
+LW_THICK = 50          # 可见轮廓线（粗实线）0.50mm
+LW_THIN = 25           # 尺寸线/尺寸界线/虚线/中心线（细线）0.25mm
+LINETYPE_CENTER = 'CENTER'   # 点画线（中心线）
 
 
 def emit(obj):
@@ -362,6 +373,7 @@ def layout_views_in_frame(clusters, paper='A3', landscape=True,
 LAYER_FRAME = 'DSH_FRAME'        # 图框 + 分区标记
 LAYER_TITLE = 'DSH_TITLE'        # 标题栏
 LAYER_BOM = 'DSH_BOM'            # 明细表（独立图层，不参与视图搬动）
+LAYER_CENTER = 'DSH_CENTER'      # 中心线（GB 细点画线）
 VIEW_LAYER_FMT = 'DSH_VIEW_{}'   # 每个视图一层：DSH_VIEW_1 / _2 …
 
 # 视图图层顺序 → 国标位置
@@ -381,6 +393,72 @@ def ensure_view_layers(doc, count):
                      description=f'视图 {i}')
         names.append(nm)
     return names
+
+
+def draw_centerlines(doc, view_layers, extend=3.0, dedup_tol=0.5):
+    """给视图里的圆/圆弧画中心线（GB 细点画线）。
+
+    GB/T 4457.4：中心线用**细点画线**，两端应超出轮廓 2~5mm。
+    插件原来完全没画中心线——按国标这是硬伤：孔、圆柱、回转体
+    都必须有中心线，否则读图时无法判断孔位基准。
+
+    做法：对每个圆/圆弧圆心画一横一竖两条点画线，
+    长度 = 半径 + extend（两端各超出一段）。同心圆只画一次。
+    """
+    ms = doc.ModelSpace
+    lay = None
+    try:
+        lay = ensure_layer(doc, LAYER_CENTER, color=7)
+    except Exception:
+        lay = None
+    try:
+        lay.Linetype = LINETYPE_CENTER      # 点画线
+    except Exception:
+        pass
+    try:
+        lay.Lineweight = LW_THIN
+    except Exception:
+        pass
+
+    seen = set()
+    made = 0
+    for lname in view_layers:
+        for i in range(ms.Count):
+            try:
+                e = ms.Item(i)
+                if str(e.Layer) != lname:
+                    continue
+                onm = str(e.ObjectName)
+                if onm not in ('AcDbCircle', 'AcDbArc'):
+                    continue
+                c = e.Center
+                cx, cy = float(c[0]), float(c[1])
+                r = float(e.Radius)
+            except Exception:
+                continue
+            key = (round(cx, 1), round(cy, 1))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            half = r + extend
+            for p1, p2 in (((cx - half, cy, 0), (cx + half, cy, 0)),
+                           ((cx, cy - half, 0), (cx, cy + half, 0))):
+                try:
+                    ln = ms.AddLine(_vec(p1), _vec(p2))
+                    ln.Layer = LAYER_CENTER
+                    try:
+                        ln.Linetype = LINETYPE_CENTER
+                    except Exception:
+                        pass
+                    try:
+                        ln.Lineweight = LW_THIN
+                    except Exception:
+                        pass
+                    made += 1
+                except Exception:
+                    pass
+    return {'ok': made > 0, 'lines': made, 'centers': len(seen)}
 
 
 def _entity_bbox(e, name):
@@ -1716,6 +1794,17 @@ def auto_dimension(doc, opts=None):
         except Exception as exc:
             emit({'stage': 'acad_layout_by_layer', 'error': str(exc)})
 
+    # ---- 阶段 C2：补中心线（GB 细点画线）----
+    # 必须在视图搬完之后画，否则中心线位置和圆对不上。
+    if view_layers and opts.get('centerlines', True):
+        try:
+            cl = draw_centerlines(doc, view_layers,
+                                  extend=float(opts.get('centerlineExtend', 3.0)))
+            emit({'stage': 'acad_centerlines', **cl})
+        except Exception as exc:
+            emit({'stage': 'acad_centerlines', 'ok': False,
+                  'error': f'{type(exc).__name__}: {exc}'})
+
     # 兜底：没有视图边界信息时退回几何聚类
     if not view_layers:
         geo = collect_entities(doc, paper=(paper_w, paper_h))
@@ -1770,9 +1859,16 @@ def auto_dimension(doc, opts=None):
     text_h, text_basis = text_height_for_paper(paper, view_h)
     try:
         doc.SetVariable('DIMTXT', text_h)
-        doc.SetVariable('DIMASZ', text_h)           # 箭头≈字高
+        # 箭头：GB/T 4458.4 规定箭头长度约 2~5mm（字高 3.5 时取 2.5），
+        # 不是「等于字高」。原来写 text_h 会让箭头过大、尺寸线显得笨重。
+        doc.SetVariable('DIMASZ', max(2.0, min(3.0, text_h * 0.71)))
         doc.SetVariable('DIMGAP', text_h * 0.29)
         doc.SetVariable('DIMEXE', text_h * 0.57)
+        # 尺寸线/尺寸界线：细实线 b/2
+        doc.SetVariable('DIMLWD', LW_THIN)
+        doc.SetVariable('DIMLWE', LW_THIN)
+        # 尺寸界线离开轮廓 ≥2mm
+        doc.SetVariable('DIMEXO', max(2.0, text_h * 0.57))
     except Exception:
         pass
     emit({'stage': 'acad_text_height', 'height': text_h, 'basis': text_basis})
@@ -1801,6 +1897,49 @@ def auto_dimension(doc, opts=None):
 
         _dim_one_view(ms, doc, c, bbox, stats, opts, paper, text_h)
         stats['views'] += 1
+
+    # ★ 强制统一尺寸文字高度 ★
+    # 实测踩坑：尺寸建好后 TextHeight 只有 **0.18mm**（不是 DIMTXT 的 3.5），
+    # 打印出来数字完全看不见 —— 尺寸线、箭头都在，就是没有字，
+    # 看图时极易误判成「没标注」。原因是 dim 实体在创建时把当时的
+    # 标注样式高度烘进了自身属性，之后改 DIMTXT 不会回溯修改已有实体。
+    # 所以这里逐个实体覆盖，保证和 text_h 一致。
+    fixed_heights = 0
+    try:
+        for i in range(ms.Count):
+            try:
+                e = ms.Item(i)
+                if 'Dimension' not in str(e.ObjectName):
+                    continue
+                try:
+                    if abs(float(e.TextHeight) - text_h) > 1e-6:
+                        e.TextHeight = text_h
+                        fixed_heights += 1
+                except Exception:
+                    pass
+                # 颜色也强制显式（ByBlock 单色打印会变白 → 打不出字）
+                try:
+                    e.color = 7
+                except Exception:
+                    pass
+                # 小数位：GB 工程图一般用整数；非整数保留 2 位。
+                # 和字高一样，DIMDEC 在实体创建时烘进了自身，
+                # 后改系统变量不生效（实测显示成 93.4010 四位小数）。
+                try:
+                    val = float(e.Measurement)
+                    if abs(val - round(val)) < 0.005:
+                        e.PrimaryUnitsPrecision = 0      # acDimPrecisionZero
+                    else:
+                        e.PrimaryUnitsPrecision = 2      # acDimPrecisionTwo
+                except Exception:
+                    pass
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if fixed_heights:
+        emit({'stage': 'acad_text_height_fixed', 'count': fixed_heights,
+              'height': text_h})
 
     # 收尾：清掉辅助层残留，保证正式图面干净
     try:
