@@ -8,6 +8,26 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.6.5（当前）
+
+- **打通 FeatureWorks 的 COM 绑定**（新增 `lib/featureworks.py`）。
+  这是 STEP 特征识别的前置条件，之前一直卡在「拿不到方法」：
+
+  | 问题 | 原因 | 解法 |
+  |---|---|---|
+  | `Dispatch('FeatureWorks.FeatureWorksApp')` 报「找不到指定的模块」 | 注册表里 `InprocServer32` 是相对路径 `.\fworks\fworks.dll` | 在 SW 里 `sw.LoadAddIn(<SW目录>\fworks\fworks.dll)` |
+  | `GetAddInObject` 拿到 `<COMObject <unknown>>`，`dir()` 为空 | `IFeatureWorksApp` 是 **vtable 接口**，不是纯 IDispatch | 用 **comtypes**：`GetAddInObject(...).QueryInterface(mod.IFeatureWorksApp)` |
+  | comtypes `GetActiveObject` 报 `MK_E_UNAVAILABLE` | ROT 里没有 | SW 是单实例服务，`CreateObject` 就拿到运行中的实例 |
+  | 调用卡住 874 秒 | 识别时弹「swbrowser.sldedb 遗失」模态框 | 后台线程自动按回车点掉 |
+
+  另外修了整个环境：注册表写 `Toolbox Data Location = C:\SOLIDWORKS Data (3)\`
+  但**该目录不存在**，导致 Toolbox / FeatureWorks 数据库一直缺。
+  已把 `swbrowser.sldedb` 和 `lang` 补到该目录。
+
+  `recognize()` 已能跑通到「调用成功、返回结果」，
+  但三个测试零件都返回 0 个特征，还需继续排查（见 README 末尾）。
+
+### v0.6.4
 ### v0.6.4（当前）
 
 - **出图进度条** —— 面板「开始出图」下面显示百分比进度。
