@@ -397,6 +397,32 @@ window.__ModuleLoader__.load({
         }
       }, [form.drawingTitle, set])
 
+      /** 用原生对话框选软件启动程序（SLDWORKS.exe / acad.exe） */
+      const pickExe = useCallback(async (field, detectedPath) => {
+        try {
+          setLog('正在弹出选择程序对话框（可能在任务栏里闪烁）…')
+          const initial = String(detectedPath || '').replace(/[\\/][^\\/]*$/, '')
+          const r = await fetch(API + '/api/pick-file', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ kind: 'exe', initial })
+          })
+          const j = await r.json().catch(() => ({}))
+          if (!j?.ok) {
+            setLog('选择程序失败：' + (j?.error || '后端没有响应'))
+            return
+          }
+          if (j.canceled || !j.path) {
+            setLog('已取消选择程序')
+            return
+          }
+          set(field, String(j.path))
+          setLog(`${field === 'solidworksExe' ? 'SolidWorks' : 'AutoCAD'} 路径已设为：${j.path}`)
+        } catch (e) {
+          setLog('选择程序失败：' + (e?.message || e))
+        }
+      }, [set])
+
       /** 用原生对话框选模型 —— 装配体唯一正确的用法（保住零件引用） */
       const pickModelFile = useCallback(async () => {
         try {
@@ -710,23 +736,39 @@ window.__ModuleLoader__.load({
 
           /* 软件启动路径 */
           h('div', { style: styles.sectionTitle }, '软件启动路径（留空自动探测）'),
-          h(Field, { label: 'SolidWorks' },
-            h('input', {
-              style: styles.input,
-              placeholder: detected.solidworks?.exe || 'SLDWORKS.exe 路径（会自动探测）',
-              value: form.solidworksExe,
-              onChange: (e) => set('solidworksExe', e.target.value)
-            }),
-            pathHint(detected.solidworks, form.solidworksExe)
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6 } },
+            h('span', { style: { fontSize: 12, opacity: 0.75, flex: '0 0 84px', paddingTop: 7 } }, 'SolidWorks'),
+            h('div', { style: { flex: 1, minWidth: 0 } },
+              h('input', {
+                style: { ...styles.input, width: '100%', boxSizing: 'border-box' },
+                placeholder: detected.solidworks?.exe || 'SLDWORKS.exe 路径（会自动探测）',
+                value: form.solidworksExe || '',
+                onChange: (e) => set('solidworksExe', e.target.value)
+              }),
+              pathHint(detected.solidworks, form.solidworksExe)
+            ),
+            h('button', {
+              type: 'button',
+              style: { ...styles.btnGhost, padding: '5px 12px', marginTop: 1 },
+              onClick: () => pickExe('solidworksExe', detected.solidworks?.exe)
+            }, '浏览…')
           ),
-          h(Field, { label: 'AutoCAD' },
-            h('input', {
-              style: styles.input,
-              placeholder: detected.autocad?.exe || 'acad.exe 路径，也可只填安装目录',
-              value: form.autocadExe,
-              onChange: (e) => set('autocadExe', e.target.value)
-            }),
-            pathHint(detected.autocad, form.autocadExe)
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6 } },
+            h('span', { style: { fontSize: 12, opacity: 0.75, flex: '0 0 84px', paddingTop: 7 } }, 'AutoCAD'),
+            h('div', { style: { flex: 1, minWidth: 0 } },
+              h('input', {
+                style: { ...styles.input, width: '100%', boxSizing: 'border-box' },
+                placeholder: detected.autocad?.exe || 'acad.exe 路径，也可只填安装目录',
+                value: form.autocadExe || '',
+                onChange: (e) => set('autocadExe', e.target.value)
+              }),
+              pathHint(detected.autocad, form.autocadExe)
+            ),
+            h('button', {
+              type: 'button',
+              style: { ...styles.btnGhost, padding: '5px 12px', marginTop: 1 },
+              onClick: () => pickExe('autocadExe', detected.autocad?.exe)
+            }, '浏览…')
           ),
           detected.error
             ? h('div', { style: styles.pathHintBad }, '✗ 探测失败：' + detected.error)
