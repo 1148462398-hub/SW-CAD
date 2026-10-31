@@ -65,6 +65,10 @@ import sys
 import time
 import traceback
 
+# 本目录下的应用路径解析（SolidWorks / AutoCAD 启动路径）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import apps  # noqa: E402
+
 # ---------------- SolidWorks 常量（手写，避免依赖 interop dll） ----------------
 SW_DOC_PART = 1
 SW_DOC_ASSEMBLY = 2
@@ -139,8 +143,23 @@ def kill_report_dialogs():
         pass
 
 
-def connect(visible=True):
+def connect(visible=True, exe_hint=None, log=None):
+    """连上 SolidWorks。
+
+    exe_hint：用户/配置指定的 SLDWORKS.exe 路径（留空自动探测）。
+    显式路径的意义：多版本共存或装在非默认盘时，Dispatch 可能连到别的版本，
+    或者干脆起不来。先按路径把进程拉起来，再 Dispatch 连运行实例最稳。
+    """
     import win32com.client as win32
+
+    exe, source, msg = ensure_running(
+        apps.SOLIDWORKS, exe_hint, log=log)
+    if log:
+        try:
+            log(f'SolidWorks 路径: {exe or "未找到"}（{source}）')
+        except Exception:
+            pass
+
     sw = win32.Dispatch('SldWorks.Application')
     try:
         sw.Visible = bool(visible)
@@ -1990,7 +2009,7 @@ def auto_fit_scale(model_size, paper, landscape, requested_den=None, attempts=4)
     return float(den)
 
 
-def edit_dwg_title_block(dwg_path, fields, visible=False):
+def edit_dwg_title_block(dwg_path, fields, visible=False, exe_hint=None):
     """第二步：调 AutoCAD 改写 DWG 标题栏。
 
     SolidWorks 自带 GB 图框的标题栏是静态文字，只能导出 DWG 后在 AutoCAD 里改。
@@ -1999,7 +2018,8 @@ def edit_dwg_title_block(dwg_path, fields, visible=False):
     import importlib
     import acad_editor
     importlib.reload(acad_editor)
-    return acad_editor.edit_title_block(dwg_path, fields, None, visible)
+    return acad_editor.edit_title_block(dwg_path, fields, None, visible,
+                                        exe_hint=exe_hint)
 
 
 
@@ -2184,7 +2204,8 @@ def build(payload):
         raise FileNotFoundError(f'模型不存在: {model}')
 
     kill_report_dialogs()
-    sw = connect(payload.get('visible', True))
+    sw = connect(payload.get('visible', True),
+                 exe_hint=payload.get('solidworksExe'))
     emit({'stage': 'connected', 'revision': str(sw.RevisionNumber)})
 
     # ── 中立格式（STEP/IGES/Parasolid）：先导入再另存 .sldprt ──
@@ -2623,13 +2644,15 @@ def build(payload):
                 acad_dim_result = acad_dimension.dimension_dwg(
                     out_dwg, opts,
                     payload.get('acadVisible', False),
-                    None)   # None = 就地保存
+                    None,   # None = 就地保存
+                    exe_hint=payload.get('autocadExe'))
                 emit({'stage': 'acad_dimension', **(acad_dim_result or {})})
 
             # 标题栏也用 AutoCAD 填（SolidWorks 图框是静态文字，填不进去）
             if tb:
                 acad_result = edit_dwg_title_block(
-                    out_dwg, tb, payload.get('acadVisible', False))
+                    out_dwg, tb, payload.get('acadVisible', False),
+                    exe_hint=payload.get('autocadExe'))
                 emit({'stage': 'acad_title_block', **(acad_result or {})})
         except Exception as exc:
             emit({'stage': 'acad_post_error', 'error': str(exc),
@@ -2686,14 +2709,45 @@ def build(payload):
 
 
 def probe(payload):
+    """环境探测：**不启动** SolidWorks / AutoCAD，只报告路径与状态。
+
+    为什么不在 probe 里启动：启动 SolidWorks 要 30~60 秒，
+    用户点一下「检测路径」却卡住一分钟会很困惑。
+    这里只回答「路径找到没、程序在不在跑」，真正启动留到出图时。
+    """
     info = {'ok': True, 'solidworks': None, 'template': None, 'sheetFormats': []}
+
+    # 「启动路径」探测结果
     try:
-        kill_report_dialogs()
-        sw = connect(payload.get('visible', False))
-        info['solidworks'] = {'revision': str(sw.RevisionNumber), 'running': True}
+        info['paths'] = apps.probe_info(
+            payload.get('solidworksExe'), payload.get('autocadExe'))
     except Exception as exc:
+        info['paths'] = {'error': str(exc)}
+
+    sw_path = (info.get('paths') or {}).get('solidworks') or {}
+    ac_path = (info.get('paths') or {}).get('autocad') or {}
+
+    # 路径都没找到 → 才算探测失败
+    if not sw_path.get('exists') and not ac_path.get('exists'):
         info['ok'] = False
-        info['solidworks'] = {'error': str(exc)}
+
+    # SolidWorks：只在已运行时才尝试 COM 连接（不主动拉起）
+    if sw_path.get('running'):
+        try:
+            kill_report_dialogs()
+            sw = connect(False, exe_hint=payload.get('solidworksExe'))
+            info['solidworks'] = {'revision': str(sw.RevisionNumber),
+                                  'running': True}
+        except Exception as exc:
+            info['solidworks'] = {'running': True, 'error': str(exc)}
+    else:
+        info['solidworks'] = {
+            'running': False,
+            'note': ('未检测到运行中的 SolidWorks；出图时会按上面的路径启动'
+                     if sw_path.get('exists') else
+                     '没找到 SLDWORKS.exe，请在面板里填启动路径'),
+        }
+
     tpl = payload.get('template') or DEFAULT_TEMPLATE
     info['template'] = {'path': tpl, 'exists': os.path.exists(tpl)}
     if os.path.isdir(SHEETFORMAT_DIR):
@@ -2705,7 +2759,7 @@ def probe(payload):
 
 def close_all(payload):
     kill_report_dialogs()
-    sw = connect(False)
+    sw = connect(False, exe_hint=payload.get('solidworksExe'))
     sw.CloseAllDocuments(True)
     return {'ok': True, 'closed': True}
 
@@ -2749,10 +2803,12 @@ def print_pdf(payload):
         timeout_s = 120.0
 
     emit({'stage': 'pdf_start', 'dwg': dwg, 'pdf': pdf,
-          'paper': paper, 'monochrome': bool(mono)})
+          'paper': paper, 'monochrome': bool(mono),
+          'autocadExe': payload.get('autocadExe') or None})
 
     res = export_pdf(dwg, pdf, paper=paper, monochrome=bool(mono),
                      timeout_s=timeout_s,
+                     exe_hint=payload.get('autocadExe'),
                      log=lambda m: emit({'stage': 'pdf_log', 'msg': m}))
     return res
 
