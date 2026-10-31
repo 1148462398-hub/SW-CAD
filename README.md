@@ -8,6 +8,60 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.11.1（当前）
+
+**面板一键把指令发给 AI，全自动，不需要用户复制粘贴。**
+
+用户要求：「生成指令能不能自动去做，插件自动调用 AI，不用我来点」。
+
+查 DSH 客户端源码，找到官方入口 `conversation` 服务：
+
+```js
+async send(text) {
+  const result = await this.scopedSession('send').prompt([{ type: 'text', text }], 'queue')
+  if (!result.ok) throw new Error(`conversation.send failed: ...`)
+}
+```
+
+所以客户端插件只要 `inject: ['slots', 'conversation']`，
+就能把一段文字**当作用户消息提交给当前会话**，AI 收到后自己去调插件工具。
+
+面板改动：
+
+```
+推荐：交给 AI 出图
+  [ 交给本鱼出图（自动发送） ]  [ 只生成指令 ]
+```
+
+点第一个按钮：收集面板参数 → 生成指令 → `conversation.send(cmd)` → AI 自动开跑。
+不再需要复制、切窗口、粘贴。
+
+兜底：若当前 DSH 版本没有 `conversation` 服务，
+会退回复制到剪贴板并提示手动粘贴（不会静默失败）。
+
+离线自检：
+
+```
+inject = ["slots","conversation"]
+有「交给本鱼出图（自动发送）」: true
+有「只生成指令」: true
+```
+
+**完整链路（不经过插件自己的 HTTP 通道）**
+
+```
+面板点按钮
+  → conversation.send(指令)          ← DSH 官方客户端服务
+  → AI 收到用户消息
+  → AI 调 cad_draw_build / cad_draw_pick  ← 插件工具
+  → engine.py + SolidWorks/AutoCAD COM   ← 纯代码出图
+  → DXF / DWG
+```
+
+AI 只做「调度 + 判断（选文件、看渲染图、错了重试）」，
+所有绘图逻辑仍是插件代码，面板也只负责收集参数。
+
+### v0.11.0
 ### v0.11.0（当前）
 
 **架构调整：AI 工具当主力，面板退为「参数收集器」。**
