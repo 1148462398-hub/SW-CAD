@@ -125,6 +125,72 @@ def open_or_activate(acad, dwg_path):
     return acad.ActiveDocument
 
 
+def _close_quietly(doc):
+    """关文档，任何异常都吞掉（关不掉也不该影响主流程）。"""
+    try:
+        doc.Close(False)
+        return True
+    except Exception:
+        return False
+
+
+def export_dxf_from_dwg(dwg_path, dxf_path, exe_hint=None, log=None):
+    """用 AutoCAD 把加工后的 DWG 另存成 DXF。
+
+    ⚠ 为什么必须重新导出：
+        engine 里 SolidWorks 先导出过一份 DXF，但那份是**AutoCAD 加工之前**的
+        （没有 DSH_DIM 标注、视图没搬进图框、没有中心线）。
+        用户拿到的 DXF 应该是 AutoCAD 处理后的结果，所以加工完要重新导一次。
+
+    做法：打开 DWG → SaveAs(dxf, 61=ac2013_dxf) → Close(False)。
+    SaveAs 只改「文档关联的文件名」，磁盘上的原 DWG 不受影响。
+    """
+    try:
+        import apps
+        apps.ensure_running(apps.AUTOCAD, exe_hint, log=log)
+    except Exception:
+        pass
+
+    pythoncom.CoInitialize()
+    acad = win32.Dispatch('AutoCAD.Application')
+    try:
+        acad.Documents.Open(os.path.abspath(dwg_path))
+        time.sleep(1.5)
+        doc = acad.ActiveDocument
+    except Exception as exc:
+        return {'ok': False, 'error': f'打开 DWG 失败: {exc}'}
+
+    try:
+        try:
+            doc.SaveAs(os.path.abspath(dxf_path), 61)   # ac2013_dxf
+        except Exception:
+            doc.SaveAs(os.path.abspath(dxf_path))
+        time.sleep(1.5)
+    except Exception as exc:
+        _close_quietly(doc)
+        return {'ok': False, 'error': f'另存 DXF 失败: {exc}'}
+
+    _close_quietly(doc)
+
+    if not os.path.isfile(dxf_path):
+        # 有些版本会自己补后缀
+        alt = dxf_path + '.dwg'
+        if os.path.isfile(alt):
+            try:
+                os.replace(alt, dxf_path)
+            except Exception:
+                pass
+
+    ok = os.path.isfile(dxf_path) and os.path.getsize(dxf_path) > 0
+    if log:
+        try:
+            log(f'AutoCAD 重新导出 DXF：{"成功" if ok else "失败"} {dxf_path}')
+        except Exception:
+            pass
+    return {'ok': ok, 'dxf': dxf_path,
+            'size': os.path.getsize(dxf_path) if ok else 0}
+
+
 def close_document(dwg_path, exe_hint=None):
     """关掉指定的 DWG 文档（不动 AutoCAD 进程，也不碰用户自己的图）。
 
