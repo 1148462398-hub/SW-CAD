@@ -251,7 +251,18 @@ window.__ModuleLoader__.load({
         exportDwg: true,
         // AutoCAD 后处理：把视图搬进图框 + 国标标注 + 标题栏
         acadDimension: true,
+        // 装配体：整套图纸（总图 + 每个零件图 + 合并 DXF）
+        drawset: true,
+        bom: true,
+        balloons: true,
       }
+    }
+
+    /** 拖进来的是不是装配体（决定要不要显示「整套图纸」区块） */
+    function isAssemblyFile(f) {
+      if (!f) return false
+      const s = String(f.name || f.path || '')
+      return /\.sldasm$/i.test(s)
     }
 
     function Field(props) {
@@ -432,6 +443,9 @@ window.__ModuleLoader__.load({
             exportDxf: form.exportDxf,
             exportDwg: form.exportDwg,
             acadDimension: form.acadDimension,
+            drawset: form.drawset,
+            bom: form.bom,
+            balloons: form.balloons,
             preview: true
           }
           const res = await fetch(API + '/api/build', {
@@ -876,11 +890,43 @@ window.__ModuleLoader__.load({
                 onChange: (e) => set('acadDimension', e.target.checked)
               }), 'AutoCAD 后处理')
           ),
-          h('div', { style: { fontSize: 11, opacity: 0.7, marginBottom: 4 } },
+          h('div', { style: { fontSize: 11, opacity: 0.7, marginBottom: 8 } },
             form.acadDimension
               ? '视图会先摊到框外，再由 AutoCAD 搬回图框内并标注（推荐）'
               : '不开 AutoCAD：视图直接在 SolidWorks 里摆进图框，但没有国标标注')
           ,
+
+          /* 装配体：整套图纸 */
+          isAssemblyFile(file) && h('div', null,
+            h('div', { style: styles.sectionTitle }, '装配体（整套图纸）'),
+            h('label', { style: styles.check },
+              h('input', {
+                type: 'checkbox',
+                style: styles.cb,
+                checked: form.drawset,
+                onChange: (e) => set('drawset', e.target.checked)
+              }), '整套出图：装配总图 + 每个零件图 + 合并成一个 DXF'),
+            h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, margin: '8px 0 4px 22px' } },
+              h('label', { style: styles.check },
+                h('input', {
+                  type: 'checkbox',
+                  style: styles.cb,
+                  checked: form.bom,
+                  onChange: (e) => set('bom', e.target.checked)
+                }), '明细表 BOM'),
+              h('label', { style: styles.check },
+                h('input', {
+                  type: 'checkbox',
+                  style: styles.cb,
+                  checked: form.balloons,
+                  onChange: (e) => set('balloons', e.target.checked)
+                }), '零件序号气泡')
+            ),
+            h('div', { style: { fontSize: 11, opacity: 0.7, marginBottom: 4 } },
+              form.drawset
+                ? '会先出装配总图，再逐件出零件图，最后合并成一个 DXF（多图框并排）。件多时较慢，看下方进度条'
+                : '只出装配总图（含 BOM + 气泡），不拆零件图')
+          ),
 
           /* 操作 */
           h('div', { style: { marginTop: 20, display: 'flex', gap: 10 } },
