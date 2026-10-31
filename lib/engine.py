@@ -2849,21 +2849,40 @@ def build(payload):
                 pass
         emit({'stage': 'detail_view', 'ok': detail_ok})
 
-    # 标注参数参考 github.com/BlakeOlinger/AutoDimensioner 的实现：
-    #   InsertModelAnnotations3(swImportModelItemsFromEntireModel=0,
-    #                          swInsertDimensionsMarkedForDrawing=32768,
-    #                          AllViews=true, DuplicateDims=false,
-    #                          HiddenFeatureDims=false, UsePlacementInSketch=false)
-    # 实测这个组合比 DuplicateDims=True 多出近一倍尺寸（34 vs 19），
-    # 因为 False 才允许同一模型尺寸在不同视图各自显示。
-    default_types = payload.get('annotationTypes', SW_INSERT_DIMENSIONS_MARKED)
-    # 注意：参考代码用 False，但那是在它自己的装配体+双层视图场景下。
-    # 实测本机零件上用 False 会插 51 个尺寸、排不下并压到标题栏，反而更差。
-    # 所以这里默认 True（19 个），更符合「清晰」要求。
-    default_dup = payload.get('duplicateDims', True)
-    anns = annotate(dw, default_types, duplicate_dims=default_dup)
-    dims = count_dims(dw)
-    emit({'stage': 'annotated', 'objects': len(anns), 'dimensions': dims})
+    # ★ 决定「谁来标注」——只能有一套，不能两边都标 ★
+    #
+    # 用户明确指出：「发现标注怎么还是在 SolidWorks 里标注，
+    # 之前不是试过在 AutoCAD 里标注吗」。
+    #
+    # 之前是两套**同时**跑：SolidWorks 插 7 个模型尺寸，
+    # AutoCAD 又按几何标了 16 个 → 图上出现两套尺寸互相压。
+    #
+    # 规则：
+    #   · 走 AutoCAD 标注（acadDimension=true，默认）→ SolidWorks 这步**整段跳过**
+    #   · 显式 swDimension:true 才强制 SolidWorks 标（不用 AutoCAD 时）
+    use_acad_dim = bool(payload.get('acadDimension', True))
+    force_sw_dim = bool(payload.get('swDimension', False))
+    if use_acad_dim and not force_sw_dim:
+        emit({'stage': 'annotated_skipped',
+              'reason': 'AutoCAD 负责标注，SolidWorks 不再插模型尺寸（避免两套尺寸打架）'})
+        anns = []
+        dims = 0
+    else:
+        # 标注参数参考 github.com/BlakeOlinger/AutoDimensioner 的实现：
+        #   InsertModelAnnotations3(swImportModelItemsFromEntireModel=0,
+        #                          swInsertDimensionsMarkedForDrawing=32768,
+        #                          AllViews=true, DuplicateDims=false,
+        #                          HiddenFeatureDims=false, UsePlacementInSketch=false)
+        # 实测这个组合比 DuplicateDims=True 多出近一倍尺寸（34 vs 19），
+        # 因为 False 才允许同一模型尺寸在不同视图各自显示。
+        default_types = payload.get('annotationTypes', SW_INSERT_DIMENSIONS_MARKED)
+        # 注意：参考代码用 False，但那是在它自己的装配体+双层视图场景下。
+        # 实测本机零件上用 False 会插 51 个尺寸、排不下并压到标题栏，反而更差。
+        # 所以这里默认 True（19 个），更符合「清晰」要求。
+        default_dup = payload.get('duplicateDims', True)
+        anns = annotate(dw, default_types, duplicate_dims=default_dup)
+        dims = count_dims(dw)
+        emit({'stage': 'annotated', 'objects': len(anns), 'dimensions': dims})
 
     # 按 GB/T 4458.4 去重：同一要素不得在多视图重复标注
     dedupe_removed = 0
@@ -3034,6 +3053,15 @@ def build(payload):
             # 明细表外包围框：AutoCAD 用它把表格图元划到 DSH_BOM 独立图层
             if bom_box_mm:
                 opts.setdefault('bomBoxMm', bom_box_mm)
+            # 装配体：标注数量收紧（几十个孔的直径全标会糊成一团黑）
+            if is_assembly:
+                opts.setdefault('assemblyMode', True)
+                opts.setdefault('maxDiameters',
+                                int(payload.get('maxDiameters', 4)))
+            # ★ 让 dimension_dwg 在同一个 AutoCAD 会话里直接导出加工后的 DXF
+            #   （在外面另外 Open 一次会拿到失效的 COM 对象，报 <unknown>.SaveAs）
+            if payload.get('exportDxf', True) and out_dxf:
+                opts.setdefault('dxfPath', out_dxf)
             if want_acad:
                 acad_dim_result = acad_dimension.dimension_dwg(
                     out_dwg, opts,
@@ -3054,10 +3082,10 @@ def build(payload):
 
         # ★ AutoCAD 加工完，重新导出 DXF ★
         # 用户明确指出：「开始出图应该是输出 AutoCAD 画的 dxf 文件」。
-        # SolidWorks 导出的那份 DXF 是加工**之前**的（没标注、视图没搬进图框、
-        # 没中心线），必须在这里用 AutoCAD 另存覆盖掉，否则用户拿到的
-        # DXF 里什么都看不到（他以为「AutoCAD 里啥都没有」）。
-        if out_dwg and payload.get('exportDxf', True) and out_dxf:
+        # 正常情况 dimension_dwg 已经在同一个会话里导好了（opts.dxfPath），
+        # 这里只在它没导成功时兜底：重新开一次 AutoCAD 单独导。
+        already = bool((acad_result or {}).get('dxfOk'))
+        if (not already) and out_dwg and payload.get('exportDxf', True) and out_dxf:
             try:
                 from acad_plot import export_dxf_from_dwg
                 re_dxf = export_dxf_from_dwg(
