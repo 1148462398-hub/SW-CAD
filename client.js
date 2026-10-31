@@ -317,6 +317,10 @@ window.__ModuleLoader__.load({
          这里统一兜底，新增字段再也不会炸。 */
       const form = { ...defaultForm, ...rawForm }
       const [file, setFile] = useState(null)
+      /* 用原生对话框选出来的**原始绝对路径**。
+         装配体必须走这条路：拖拽只能拿到字节，复制到 uploads 后
+         同目录零件就找不到了（实测明细表只剩 2 行、视图空白）。 */
+      const [pickedPath, setPickedPath] = useState('')
       const [over, setOver] = useState(false)
       const [busy, setBusy] = useState(false)
       const [pdfBusy, setPdfBusy] = useState(false)
@@ -334,6 +338,31 @@ window.__ModuleLoader__.load({
 
       const set = useCallback((key, value) => {
         setForm((prev) => ({ ...prev, [key]: value }))
+      }, [])
+
+      /** 弹 Windows 原生「选择文件夹」对话框（资源管理器那种） */
+      const pickOutDir = useCallback(async () => {
+        try {
+          setLog('正在弹出选择目录对话框（可能在任务栏里闪烁）…')
+          const r = await fetch(API + '/api/pick-folder', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ initial: '' })
+          })
+          const j = await r.json().catch(() => ({}))
+          if (!j?.ok) {
+            setLog('选择目录失败：' + (j?.error || '后端没有响应'))
+            return
+          }
+          if (j.canceled || !j.path) {
+            setLog('已取消选择目录')
+            return
+          }
+          setForm((prev) => ({ ...prev, outDir: j.path }))
+          setLog('输出目录已设为：' + j.path)
+        } catch (e) {
+          setLog('选择目录失败：' + (e?.message || e))
+        }
       }, [])
 
       const toggleView = useCallback((key) => {
@@ -357,12 +386,47 @@ window.__ModuleLoader__.load({
             'STEP/IGES 请先在 SolidWorks 里另存为 .sldprt。')
           return
         }
+        // 拖拽来的文件没有真实路径，清掉之前用对话框选过的路径
+        setPickedPath('')
         setFile(f)
         setLog('')
         setResult(null)
         // 图纸名称默认取文件名
         if (!form.drawingTitle) {
           set('drawingTitle', name.replace(/\.(sldprt|sldasm)$/i, ''))
+        }
+      }, [form.drawingTitle, set])
+
+      /** 用原生对话框选模型 —— 装配体唯一正确的用法（保住零件引用） */
+      const pickModelFile = useCallback(async () => {
+        try {
+          setLog('正在弹出选择文件对话框（可能在任务栏里闪烁）…')
+          const r = await fetch(API + '/api/pick-file', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ initial: '' })
+          })
+          const j = await r.json().catch(() => ({}))
+          if (!j?.ok) {
+            setLog('选择文件失败：' + (j?.error || '后端没有响应'))
+            return
+          }
+          if (j.canceled || !j.path) {
+            setLog('已取消选择文件')
+            return
+          }
+          const full = String(j.path)
+          const nm = full.replace(/^.*[\\/]/, '')
+          // 用一个「假 File」显示文件名，真实路径存在 pickedPath 里
+          setFile({ name: nm, path: full, size: 0, picked: true })
+          setPickedPath(full)
+          setResult(null)
+          setLog('已选择模型（原始路径）：' + full)
+          if (!form.drawingTitle) {
+            set('drawingTitle', nm.replace(/\.(sldprt|sldasm)$/i, ''))
+          }
+        } catch (e) {
+          setLog('选择文件失败：' + (e?.message || e))
         }
       }, [form.drawingTitle, set])
 
@@ -389,11 +453,15 @@ window.__ModuleLoader__.load({
           }
         }, 800)
         try {
-          /* 浏览器里 File 对象没有本地路径（file.path 只有 Electron 才有），
-             必须先把字节传到后端落盘，拿到绝对路径再出图。
-             Electron/桌面端若已有 file.path 就跳过上传，省一次拷贝。 */
-          let modelPath = file.path || ''
-          if (!modelPath) {
+          /* 三种来源，优先级从高到低：
+             1) pickedPath —— 原生对话框选的**原始路径**（装配体必须用这个，
+                因为它依赖同目录零件；复制到 uploads 会丢引用）
+             2) file.path —— Electron/桌面端才有
+             3) 上传字节 —— 纯浏览器拖拽，落盘成副本 */
+          let modelPath = pickedPath || file.path || ''
+          if (modelPath && pickedPath) {
+            setLog(`使用原始路径：${modelPath}\n\n正在调用 SolidWorks 出图，单件约 1–4 分钟，请勿重复点击…\n`)
+          } else if (!modelPath) {
             setLog('正在上传模型到本机…\n')
             const up = await fetch(
               API + '/api/upload?name=' + encodeURIComponent(file.name),
@@ -613,6 +681,32 @@ window.__ModuleLoader__.load({
               onChange: (e) => acceptFile(e.target.files?.[0])
             })
           ),
+
+          /* 装配体必须用「原始路径」：拖拽只会把 .SLDASM 本身复制到 uploads，
+             同目录的零件引用全断，开出来是空装配体。 */
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 } },
+            h('button', {
+              type: 'button',
+              style: { ...styles.btnGhost, padding: '6px 14px' },
+              onClick: () => pickModelFile()
+            }, '选择模型文件（装配体请用这个）')
+          ),
+          (() => {
+            const isAsm = file && /\.sldasm$/i.test(String(file.name || ''))
+            if (!isAsm) return null
+            return h('div', {
+              style: {
+                marginTop: 8, padding: '8px 12px', borderRadius: 6,
+                border: '1px solid #e0b100', background: 'rgba(224,177,0,0.12)',
+                fontSize: 11.5, lineHeight: 1.6
+              }
+            },
+              '⚠ 装配体不能靠「拖拽」上传：拖进来的只是 .SLDASM 一个文件，',
+              '同目录的零件找不到，SolidWorks 会开成空装配体（明细表只剩几行、视图空白）。',
+              h('br'),
+              '请点上面的『选择模型文件』，选 D:\\5寸机\\装配体1.SLDASM 这个**原始位置**的文件。'
+            )
+          })(),
 
           /* 软件启动路径 */
           h('div', { style: styles.sectionTitle }, '软件启动路径（留空自动探测）'),
@@ -896,15 +990,21 @@ window.__ModuleLoader__.load({
           /* 输出 */
           /* 保存位置 */
           h('div', { style: styles.sectionTitle }, '保存位置'),
-          h(Field, { label: '输出目录' },
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 } },
+            h('span', { style: { fontSize: 12, opacity: 0.75, flex: '0 0 76px' } }, '保存到'),
             h('input', {
-              style: styles.input,
-              placeholder: '留空 = 模型旁边的「出图_模型名」文件夹；也可填绝对路径',
+              style: { ...styles.input, flex: 1, minWidth: 0 },
+              placeholder: '点右边「浏览…」选文件夹；留空 = 模型旁边',
               value: form.outDir || '',
               onChange: (e) => set('outDir', e.target.value)
-            })
+            }),
+            h('button', {
+              type: 'button',
+              style: { ...styles.btnGhost, padding: '5px 12px' },
+              onClick: () => pickOutDir()
+            }, '浏览…')
           ),
-          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', margin: '2px 0 4px 84px' } },
+          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', margin: '0 0 4px 84px' } },
             h('button', {
               type: 'button',
               style: { ...styles.btnGhost, padding: '3px 10px', fontSize: 12 },
