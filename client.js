@@ -161,6 +161,9 @@ window.__ModuleLoader__.load({
       return {
         paperSize: 'A3',
         annotationStandard: 'GB',
+        // ── 软件启动路径（留空 = 自动探测）──
+        solidworksExe: '',
+        autocadExe: '',
         landscape: true,
         views: ['front', 'top', 'right', 'isometric'],
         sectionMode: 'auto',
@@ -208,6 +211,7 @@ window.__ModuleLoader__.load({
       const [over, setOver] = useState(false)
       const [busy, setBusy] = useState(false)
       const [pdfBusy, setPdfBusy] = useState(false)
+      const [probeBusy, setProbeBusy] = useState(false)
       const [pdfPath, setPdfPath] = useState('')
       const [log, setLog] = useState('')
       const [result, setResult] = useState(null)
@@ -265,6 +269,8 @@ window.__ModuleLoader__.load({
             outDir: '',
             paperSize: form.paperSize,
             annotationStandard: form.annotationStandard,
+            solidworksExe: form.solidworksExe || '',
+            autocadExe: form.autocadExe || '',
             landscape: form.landscape,
             views: form.views,
             sectionView: form.sectionMode === 'auto'
@@ -326,6 +332,36 @@ window.__ModuleLoader__.load({
         }
       }, [file, form])
 
+      /* 检测启动路径：按当前填的路径探测，显示实际找到的 exe 和是否在运行 */
+      const probePaths = useCallback(async () => {
+        setProbeBusy(true)
+        setLog('正在检测 SolidWorks / AutoCAD 启动路径…\n')
+        try {
+          const qs = new URLSearchParams()
+          if (form.solidworksExe) qs.set('solidworksExe', form.solidworksExe)
+          if (form.autocadExe) qs.set('autocadExe', form.autocadExe)
+          const res = await fetch(API + '/api/probe?' + qs.toString())
+          const json = await res.json()
+          const p = json?.info?.paths || {}
+          const lines = []
+          for (const [k, label] of [['solidworks', 'SolidWorks'], ['autocad', 'AutoCAD']]) {
+            const it = p[k] || {}
+            lines.push(
+              `${label}: ${it.exe || '未找到'}` +
+              `\n  来源=${it.source || '?'}  存在=${it.exists ? '是' : '否'}  运行中=${it.running ? '是' : '否'}`
+            )
+          }
+          const sw = json?.info?.solidworks
+          if (sw?.error) lines.push(`SolidWorks 连接错误: ${sw.error}`)
+          else if (sw?.revision) lines.push(`SolidWorks 版本: ${sw.revision}`)
+          setLog(lines.join('\n\n'))
+        } catch (error) {
+          setLog('检测失败：' + (error?.message || String(error)))
+        } finally {
+          setProbeBusy(false)
+        }
+      }, [form.solidworksExe, form.autocadExe])
+
       /* 一键打印 PDF：打印范围自动取图纸里最外层的包围框；黑白输出，DWG 颜色保留 */
       const printPdf = useCallback(async () => {
         const dwg = result?.dwg
@@ -340,7 +376,11 @@ window.__ModuleLoader__.load({
           const res = await fetch(API + '/api/pdf', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ dwg, monochrome: true })
+            body: JSON.stringify({
+              dwg,
+              monochrome: true,
+              autocadExe: form.autocadExe || ''
+            })
           })
           const json = await res.json()
           setLog(json.log || (json.ok ? '打印完成' : '打印失败：' + (json.error || '')))
@@ -381,6 +421,33 @@ window.__ModuleLoader__.load({
               style: { display: 'none' },
               onChange: (e) => acceptFile(e.target.files?.[0])
             })
+          ),
+
+          /* 软件启动路径 */
+          h('div', { style: styles.sectionTitle }, '软件启动路径（留空自动探测）'),
+          h(Field, { label: 'SolidWorks' },
+            h('input', {
+              style: styles.input,
+              placeholder: 'SLDWORKS.exe 路径，如 F:\\sw\\SOLIDWORKS\\SLDWORKS.exe',
+              value: form.solidworksExe,
+              onChange: (e) => set('solidworksExe', e.target.value)
+            })
+          ),
+          h(Field, { label: 'AutoCAD' },
+            h('input', {
+              style: styles.input,
+              placeholder: 'acad.exe 路径，也可只填安装目录',
+              value: form.autocadExe,
+              onChange: (e) => set('autocadExe', e.target.value)
+            })
+          ),
+          h('div', { style: { display: 'flex', gap: 10, marginBottom: 8 } },
+            h('button', {
+              style: styles.btn(false, busy || probeBusy),
+              disabled: busy || probeBusy,
+              onClick: probePaths,
+              title: '按当前填的路径去探测 SolidWorks / AutoCAD，并显示找到的实际路径'
+            }, probeBusy ? '检测中…' : '检测路径')
           ),
 
           /* 图幅与视图 */
