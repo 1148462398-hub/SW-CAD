@@ -8,6 +8,51 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.9.0（当前）
+
+**整套图纸**：拖一个 `.SLDASM` 进去，一次出「装配总图 + 每个零件图 + 合并 DXF」。
+
+```jsonc
+cad_draw_build
+  model: "D:/xxx/总装.SLDASM"
+  drawset: true        // 整套模式
+  bom: true            // 明细表
+  balloons: true       // 零件序号气泡
+```
+
+流程：
+
+```
+① 解析装配体（GetComponents → 去重零件路径）
+② 装配总图：视图 + 明细表(BOM) + 零件序号(气泡)   → 总装.dwg
+③ 每个零件：视图 + 尺寸 + 公差 + 粗糙度           → 零件A.dwg ...
+④ 合并：全部并进一个 DXF（多图框并排）             → 总装_整套图纸.dxf
+```
+
+实测（2 个零件的装配体）：
+
+```
+[drawset_plan]       共 3 张图
+[drawset_sheet_done] 1/3 装配总图        ok
+[drawset_sheet_done] 2/3 20250107-4-4.5  ok
+[drawset_sheet_done] 3/3 GPS - 副本      ok
+[drawset_merge_done] 3 张，总宽 1300mm   ok
+→ 测试装配_整套图纸.dxf  392.5 KB，块引用 3 个
+```
+
+本期还打通了**零件序号**，关键就一个参数：
+
+```python
+# SelectByID2 的 Callout 必须是「显式的空 IDispatch 指针」
+VARIANT(pythoncom.VT_DISPATCH, None)
+# 传 None / pythoncom.Empty / 0 全都报「类型不匹配 (None, 8)」
+```
+
+另外 **IView 对象上根本没有 Select / Select2 方法**，只能走 SelectByID2。
+
+进度条现在会显示「正在出第 2/3 张：零件图 · GPS - 副本」。
+
+### v0.8.0
 ### v0.8.0（当前）
 
 **多图合成一个 DXF**（新增 `lib/acad_merge.py`）——整套图纸的基础能力。
