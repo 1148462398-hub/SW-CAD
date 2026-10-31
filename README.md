@@ -8,6 +8,40 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.8.0（当前）
+
+**多图合成一个 DXF**（新增 `lib/acad_merge.py`）——整套图纸的基础能力。
+
+用户要的是「多个 CAD 图在一个 DXF 文件里，多放几个工程图图框」。
+SolidWorks 的 `NewSheet2/3/4` 在这台机器上 `TemplateIn` 参数一直报
+`类型不匹配 (None, 3)`（空串 / 模板路径 / pythoncom.Empty 全试过），
+所以改走 **AutoCAD 合并**路线：每张图单独出 DWG，再并进一个 DXF。
+
+```python
+from acad_merge import merge_dwgs
+merge_dwgs([dwg1, dwg2, ...], 'out.dxf', gap_mm=20)
+# -> {'ok': True, 'sheets': 2, 'widthMm': 860}
+```
+
+实测：两张 A3（420 宽）并排 → X 0~944.9mm，输出 223.7 KB，
+DXF 里就是两个块引用（`测试装配`、`GPS - 副本`），每块一个完整图框。
+
+踩过的三个坑：
+
+- **`CopyObjects` 跨文档复制失败** ——
+  传 Python list 报「对象数组无效」；包成 VARIANT 数组又报「对象不在数据库中」；
+  用 SelectionSet 也还是「对象不在数据库中」。
+  最后改用 `ModelSpace.InsertBlock(点, <dwg路径>, 1,1,1, 0)` ——
+  块名给外部 DWG 路径等价于整图插入，一次成功。
+- **`SaveAs('x.dxf')` 存出来是 `x.dxf.dwg`** ——
+  只给路径时 AutoCAD 一律按 DWG 存，必须显式传 `acSaveAsType`
+  （61 = ac2013_dxf，24 = ac2013_dwg）。
+- `ss.Select(5, 0,0,0,0)` 选不到东西 —— 全选模式**只接受一个参数** `ss.Select(5)`。
+
+还没做的编排：拖入一个 `.SLDASM` → 自动出「装配总图 + 每个零件图」→ 合并成一个 DXF。
+各块都已单独验证可用，差把它们串起来。
+
+### v0.7.0
 ### v0.7.0（当前）
 
 **支持装配图**：`.SLDASM` 现在会走装配图流程，自动插入**明细表（BOM）**。
