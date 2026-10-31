@@ -2689,6 +2689,60 @@ def build(payload):
                                              scale_den=scale_den)
     emit({'stage': 'views', 'result': made})
 
+    # ── 剖视图：按国标按需添加，不无脑加 ──
+    # 判断依据：模型里有切除/孔/抽壳类特征（说明有内腔或内孔），
+    # 三视图看不出壁厚，才需要剖视表达。纯外形件加剖视图是画蛇添足。
+    section_ok = None
+    section_reason = None
+    sec_mode = payload.get('sectionView', 'auto')   # 'auto' | true | false
+    if sec_mode is True:
+        need_section, reason = True, '调用方指定'
+    elif sec_mode is False:
+        need_section, reason = False, '调用方关闭'
+    else:
+        cavity = detect_internal_cavity(doc_model)
+        need_section = cavity['needSection']
+        reason = cavity['reason']
+        emit({'stage': 'cavity_check',
+              'needSection': need_section,
+              'hasShell': cavity['hasShell'],
+              'cutCount': cavity['cutCount'],
+              'volumeRatio': (round(cavity['volumeRatio'], 4)
+                              if cavity['volumeRatio'] is not None else None),
+              'volumeMm3': (round(cavity['volumeMm3'])
+                            if cavity['volumeMm3'] else None),
+              'cutNames': cavity['cutNames'][:4],
+              'reason': reason})
+    if need_section and ref_view is not None:
+        # 剖视图按国标应「位于剖切符号箭头所指方向」，并在母视图附近。
+        # 布局策略：三视图占左上/右上/左下、轴测占右下，
+        # 剖视图放在「右下区、轴测图下方偏左」，并用可画区边界算，
+        # 绝不能压到标题栏（标题栏占右下角，高度约 55mm）。
+        sec_place = payload.get('sectionPlace')
+        if not sec_place:
+            try:
+                x0, y0, dw_w, dh_h = drawable_area(paper, landscape)
+                title_h = 0.055
+                # 可画区下边界之上、标题栏右侧留白处
+                sx = x0 + dw_w * 0.62
+                sy = y0 + title_h + dh_h * 0.28
+                sec_place = (sx, sy)
+            except Exception:
+                sec_place = None
+        sec = add_section_view(dw, ref_view,
+                               label=payload.get('sectionLabel', 'A'),
+                               direction=payload.get('sectionDirection', 'vertical'),
+                               place=sec_place)
+        section_ok = sec is not None
+        if section_ok:
+            made['section'] = True
+            try:
+                made['section_name'] = sec.GetName2
+            except Exception:
+                pass
+    section_reason = reason
+    emit({'stage': 'section_view', 'ok': section_ok, 'reason': reason})
+
     # ── 记录每个视图的边界，交给 AutoCAD 画框并重新排位 ──
     # 实测三条教训（都试过）：
     #   1) 直接给对齐的标准视图设 View.Position，SolidWorks 会为维持
@@ -2831,59 +2885,6 @@ def build(payload):
                   'boxes': view_boxes})
     except Exception as exc:
         emit({'stage': 'view_boxes', 'error': str(exc)})
-    # ── 剖视图：按国标按需添加，不无脑加 ──
-    # 判断依据：模型里有切除/孔/抽壳类特征（说明有内腔或内孔），
-    # 三视图看不出壁厚，才需要剖视表达。纯外形件加剖视图是画蛇添足。
-    section_ok = None
-    section_reason = None
-    sec_mode = payload.get('sectionView', 'auto')   # 'auto' | true | false
-    if sec_mode is True:
-        need_section, reason = True, '调用方指定'
-    elif sec_mode is False:
-        need_section, reason = False, '调用方关闭'
-    else:
-        cavity = detect_internal_cavity(doc_model)
-        need_section = cavity['needSection']
-        reason = cavity['reason']
-        emit({'stage': 'cavity_check',
-              'needSection': need_section,
-              'hasShell': cavity['hasShell'],
-              'cutCount': cavity['cutCount'],
-              'volumeRatio': (round(cavity['volumeRatio'], 4)
-                              if cavity['volumeRatio'] is not None else None),
-              'volumeMm3': (round(cavity['volumeMm3'])
-                            if cavity['volumeMm3'] else None),
-              'cutNames': cavity['cutNames'][:4],
-              'reason': reason})
-    if need_section and ref_view is not None:
-        # 剖视图按国标应「位于剖切符号箭头所指方向」，并在母视图附近。
-        # 布局策略：三视图占左上/右上/左下、轴测占右下，
-        # 剖视图放在「右下区、轴测图下方偏左」，并用可画区边界算，
-        # 绝不能压到标题栏（标题栏占右下角，高度约 55mm）。
-        sec_place = payload.get('sectionPlace')
-        if not sec_place:
-            try:
-                x0, y0, dw_w, dh_h = drawable_area(paper, landscape)
-                title_h = 0.055
-                # 可画区下边界之上、标题栏右侧留白处
-                sx = x0 + dw_w * 0.62
-                sy = y0 + title_h + dh_h * 0.28
-                sec_place = (sx, sy)
-            except Exception:
-                sec_place = None
-        sec = add_section_view(dw, ref_view,
-                               label=payload.get('sectionLabel', 'A'),
-                               direction=payload.get('sectionDirection', 'vertical'),
-                               place=sec_place)
-        section_ok = sec is not None
-        if section_ok:
-            made['section'] = True
-            try:
-                made['section_name'] = sec.GetName2
-            except Exception:
-                pass
-    section_reason = reason
-    emit({'stage': 'section_view', 'ok': section_ok, 'reason': reason})
 
     # ── 局部放大图：同样按需 ──
     detail_ok = None
