@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "methods": [
+    {
+      "name": "part-drawing-sw-acad",
+      "title": "零件图：SolidWorks 出视图 → AutoCAD 分图层/对齐/标注",
+      "whenToUse": "单个 .sldprt / STEP 转工程图，需要 GB 国标三视图 + 尺寸标注 + DXF",
+      "verified": true,
+      "verifiedAt": "2026-11-01",
+      "tags": [
+        "零件图",
+        "GB",
+        "AutoCAD标注",
+        "DXF"
+      ],
+      "steps": [
+        "连 SolidWorks（cad_draw_probe 确认路径；检测不到就让用户填或用 cad_draw_pick(kind=exe) 选）",
+        "打开模型，读包围盒尺寸，按图幅选优先比例（1:1 1:2 1:2.5 1:5 1:10）",
+        "新建工程图，套 GB 图框模板，A3 横向为默认",
+        "插视图：主视 / 俯视 / 右视（可选轴测），调用后立刻判断是否需要剖视图（有内腔/孔系才加）",
+        "记录每个视图的包围框（collect_view_boxes），这是后面 AutoCAD 分图层的依据",
+        "把所有视图 RemoveAlignment + SetAlignment(0,False) 解除投影约束，再统一把视图摊到图框外（spread_views_outside）",
+        "保存 SLDDRW，导出 DWG（只出图元，不要 SolidWorks 标注）",
+        "关闭模型释放内存",
+        "AutoCAD 打开 DWG：先按「视图框 + 工程图图框 + 明细表框」把图元分到 DSH_VIEW_n / DSH_FRAME / DSH_TITLE / DSH_BOM 图层",
+        "分完图层再建 GB 标注样式（顺序不能反，反过来图框会留在 0 层）",
+        "按图层整块平移视图进图框，避让标题栏（右下 180×58mm）和明细表",
+        "在 AutoCAD 里重新做投影对齐：基准取面积最大的视图，上下方向长对正、左右方向高平齐",
+        "补中心线（细点画线），线宽归一：轮廓 0.50、虚线/中心线/尺寸线 0.25",
+        "自动标注：外形 + 直径（同直径合并成 N×φ）+ 线性 + 角度；按图纸比例取真实尺寸",
+        "标注后统一颜色(7)、线宽、字高、小数位（整数 0 位，非整数 2 位）",
+        "遮挡检查并挪位置，至少 3 轮，直到没有文字互相压",
+        "填标题栏，保存 DWG，再用 AutoLISP/COM 重新导出 DXF（SolidWorks 那份是加工前的，不能用）",
+        "关闭 AutoCAD 文档"
+      ],
+      "notes": "易错点：① SolidWorks 不 RemoveAlignment 就设 Position 会被拉回去；② 分图层必须在 auto_dimension 内部做，提前到打开文档后会退化（DSH_FRAME 从 51 掉到 4，打印成白纸）；③ DXF 必须 AutoCAD 重新导出；④ 剖面线 AcDbHatch 也要设线宽，否则 lw=0 打印看不见。"
+    }
+  ]
+}
