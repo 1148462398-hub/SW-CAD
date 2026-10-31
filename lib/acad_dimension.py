@@ -476,14 +476,32 @@ def normalize_lineweights(doc, view_layers):
     """
     ms = doc.ModelSpace
     changed = 0
+    # ① 图层线宽也要设：这样任何 ByLayer 的图元都跟着走，
+    #    否则碰上新加的实体（默认 lw=0，打印成 0.00mm 直接看不见）。
+    try:
+        for lname in list(view_layers) + [LAYER_CENTER]:
+            lay = ensure_layer(doc, lname)
+            want_lay = LW_THIN if lname == LAYER_CENTER else LW_THICK
+            try:
+                lay.Lineweight = want_lay
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # ② 逐个实体设线宽。
+    #    ⚠ 实测有图元停在 lw=0（0.00mm）——比细线还细，打印几乎看不见。
+    #    所以只要不是虚线/中心线，一律强制成粗实线。
     for i in range(ms.Count):
         try:
             e = ms.Item(i)
             if str(e.Layer) not in view_layers:
                 continue
             onm = str(e.ObjectName)
-            if onm not in ('AcDbLine', 'AcDbCircle', 'AcDbArc', 'AcDbPolyline',
-                           'AcDbEllipse', 'AcDbSpline'):
+            # 白名单太容易漏（AcDbHatch 剖面线就被漏掉，停在 lw=0，
+            # 打印时剖面线直接看不见）。改成黑名单：除标注和文字外都设。
+            if ('Dimension' in onm or 'Text' in onm
+                    or 'Attribute' in onm or 'Leader' in onm):
                 continue
             lt = str(e.Linetype)
             try:
@@ -504,6 +522,74 @@ def normalize_lineweights(doc, view_layers):
             continue
     return {'ok': True, 'changed': changed,
             'thick': LW_THICK, 'thin': LW_THIN}
+
+
+def align_views_gb(doc, placed, tol=0.5):
+    """按国标第一角投影，把视图**重新对齐**（用户要求）。
+
+    主视图为基准：
+      · 俯视图  必须与主视图 **长对正**（x 中心一致）
+      · 右/左视图 必须与主视图 **高平齐**（y 中心一致）
+
+    SolidWorks 里已经 RemoveAlignment 解除约束（否则会被拉回去），
+    所以这里的对齐要在 AutoCAD 里**重新做一遍**。
+
+    placed: move_views_by_layer 的返回值 {layer: {target:[x,y], slot:..., size:[w,h]}}
+    返回 {'aligned': N, 'detail': {...}}
+    """
+    if not placed:
+        return {'aligned': 0}
+    ms = doc.ModelSpace
+    # 基准视图必须是**面积最大的那个**（主视图），不能按 slot 名猜 ——
+    # 实测 slot 会标错（剖视图被标成 front），拿它当基准会把整体带偏。
+    best = None
+    for layer, info in placed.items():
+        sz = info.get('size') or [0, 0]
+        area = float(sz[0]) * float(sz[1])
+        if best is None or area > best[0]:
+            best = (area, layer, info)
+    if best is None:
+        return {'aligned': 0}
+    ref_layer, ref_info = best[1], best[2]
+    rx, ry = ref_info['target'][0], ref_info['target'][1]
+
+    aligned = 0
+    detail = {}
+    for layer, info in placed.items():
+        if layer == ref_layer:
+            continue
+        tx, ty = float(info['target'][0]), float(info['target'][1])
+        # 按**相对位置**决定怎么对，不看 slot 名（slot 会标错）：
+        #   视图在主视图下方 → 长对正（x 对齐）
+        #   视图在主视图右侧/左侧 → 高平齐（y 对齐）
+        #   斜着的（轴测图）不动，避免乱飘
+        dxr, dyr = tx - rx, ty - ry
+        nx, ny = tx, ty
+        if abs(dyr) > abs(dxr):
+            nx = rx                     # 主要在上下方向 → 长对正
+        else:
+            ny = ry                     # 主要在左右方向 → 高平齐
+        if abs(nx - tx) < tol and abs(ny - ty) < tol:
+            continue
+        dx, dy = nx - tx, ny - ty
+        moved = 0
+        for i in range(ms.Count):
+            try:
+                e = ms.Item(i)
+                if str(e.Layer) != layer:
+                    continue
+                e.Move(_vec((0, 0, 0)), _vec((dx, dy, 0)))
+                moved += 1
+            except Exception:
+                pass
+        if moved:
+            info['target'] = [round(nx, 1), round(ny, 1)]
+            info['aligned'] = {'dx': round(dx, 2), 'dy': round(dy, 2)}
+            aligned += 1
+            detail[layer] = {
+                'mode': '长对正' if abs(dy) > 1e-9 else '高平齐',
+                'dx': round(dx, 2), 'dy': round(dy, 2)}
+    return {'aligned': aligned, 'detail': detail, 'reference': ref_layer}
 
 
 def resolve_dimension_overlaps(doc, text_h=3.5, rounds=3, gap_mm=1.0):
@@ -2116,6 +2202,14 @@ def auto_dimension(doc, opts=None):
                 emit({'stage': 'acad_layout_by_layer',
                       'placed': layout_placed,
                       'reserved': opts.get('reservedRects') or []})
+                # ★ 在 AutoCAD 里重新做投影对齐（长对正 / 高平齐）
+                if opts.get('alignViews', True):
+                    try:
+                        al = align_views_gb(doc, layout_placed)
+                        emit({'stage': 'acad_align', **al})
+                    except Exception as exc:
+                        emit({'stage': 'acad_align', 'ok': False,
+                              'error': str(exc)})
         except Exception as exc:
             emit({'stage': 'acad_layout_by_layer', 'error': str(exc)})
 
@@ -2254,6 +2348,15 @@ def auto_dimension(doc, opts=None):
         normalize_dimension_style(doc, text_h=text_h)
     except Exception as exc:
         emit({'stage': 'acad_overlap', 'ok': False, 'error': str(exc)})
+
+    # ③ 全部做完（含标注）之后**再归一一次线宽**：
+    #    标注过程中会新增实体，可能带回 lw=0，最后再刷一遍最保险。
+    try:
+        if view_layers:
+            lw2 = normalize_lineweights(doc, list(view_layers) + [LAYER_CENTER])
+            emit({'stage': 'acad_lineweight_final', **lw2})
+    except Exception as exc:
+        emit({'stage': 'acad_lineweight_final', 'ok': False, 'error': str(exc)})
 
     # 收尾：清掉辅助层残留，保证正式图面干净
     try:
