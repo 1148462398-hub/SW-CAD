@@ -506,6 +506,127 @@ def normalize_lineweights(doc, view_layers):
             'thick': LW_THICK, 'thin': LW_THIN}
 
 
+def resolve_dimension_overlaps(doc, text_h=3.5, rounds=3, gap_mm=1.0):
+    """检查标注文字是否互相遮挡；遮挡就挪位置。**多轮**直到稳定。
+
+    用户要求：「19 后面应该加一个检查是否有遮挡，如果遮挡要调整标注位置，
+    还有调整标注的颜色线宽，而且还有多次检查」。
+
+    做法（每轮）：
+      1. 收集所有 Dimension，取文字框（TextPosition + 字高估算）
+      2. 两两比较文字框，重叠且中心距 < 阈值 → 判定遮挡
+      3. 把「后出现」的那个沿**远离对方**的方向平移一段（逐次加长）
+      4. 再检查是否跑出视图/压到别的标注
+    多轮的原因：挪一次可能撞上第三个，所以要迭代到没有新冲突为止。
+
+    返回 {'rounds': N, 'moved': M, 'remaining': K}
+    """
+    ms = doc.ModelSpace
+    moved_total = 0
+    remaining = 0
+    used_rounds = 0
+    tw = text_h * 0.62      # 每个字符宽度的粗略估计
+    pad = max(0.6, gap_mm)
+
+    for r in range(int(rounds)):
+        used_rounds = r + 1
+        # 收集标注的文字框
+        items = []
+        for i in range(ms.Count):
+            try:
+                e = ms.Item(i)
+                onm = str(e.ObjectName)
+                if 'Dimension' not in onm:
+                    continue
+                tp = e.TextPosition
+                cx, cy = float(tp[0]), float(tp[1])
+                try:
+                    val = float(e.Measurement)
+                except Exception:
+                    val = 0.0
+                txt = f'{val:.2f}'
+                w = max(text_h * 1.4, len(txt) * tw)
+                h = text_h * 1.35
+                items.append({'e': e, 'cx': cx, 'cy': cy,
+                              'box': (cx - w / 2, cy - h / 2,
+                                      cx + w / 2, cy + h / 2),
+                              'kind': onm})
+            except Exception:
+                continue
+
+        moved_this = 0
+        conflicts = 0
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                a, b = items[i], items[j]
+                if not _rects_overlap(a['box'], b['box'], pad):
+                    continue
+                conflicts += 1
+                # 挪「后出现的」那个：沿远离对方中心的方向
+                dx = b['cx'] - a['cx']
+                dy = b['cy'] - a['cy']
+                if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+                    dx, dy = 0.0, -1.0
+                ln = math.hypot(dx, dy) or 1.0
+                step = (text_h * 1.6) * (r + 1)
+                nx = b['cx'] + dx / ln * step
+                ny = b['cy'] + dy / ln * step
+                try:
+                    b['e'].TextPosition = _vec((nx, ny, 0))
+                    b['cx'], b['cy'] = nx, ny
+                    h = (b['box'][3] - b['box'][1]) / 2
+                    w = (b['box'][2] - b['box'][0]) / 2
+                    b['box'] = (nx - w, ny - h, nx + w, ny + h)
+                    moved_this += 1
+                    moved_total += 1
+                except Exception:
+                    pass
+        remaining = conflicts
+        if conflicts == 0:
+            break
+
+    return {'rounds': used_rounds, 'moved': moved_total,
+            'remainingConflicts': remaining}
+
+
+def normalize_dimension_style(doc, text_h=3.5):
+    """统一所有标注的颜色、线宽、字高、小数位。
+
+    用户要求「调整标注的颜色线宽」。ByBlock 在单色打印下会变白，
+    所以统一改成显式颜色 7；线宽统一细实线。
+    """
+    ms = doc.ModelSpace
+    n = 0
+    for i in range(ms.Count):
+        try:
+            e = ms.Item(i)
+            if 'Dimension' not in str(e.ObjectName):
+                continue
+            try:
+                if abs(float(e.TextHeight) - text_h) > 1e-6:
+                    e.TextHeight = text_h
+            except Exception:
+                pass
+            try:
+                e.color = 7
+            except Exception:
+                pass
+            try:
+                e.Lineweight = LW_THIN
+            except Exception:
+                pass
+            # 小数位：整数→0位，否则2位
+            try:
+                val = float(e.Measurement)
+                e.PrimaryUnitsPrecision = 0 if abs(val - round(val)) < 0.005 else 2
+            except Exception:
+                pass
+            n += 1
+        except Exception:
+            continue
+    return {'ok': True, 'count': n, 'height': text_h}
+
+
 def _entity_bbox(e, name):
     """求任意图元的包围盒 (x0, y0, x1, y1)。
 
@@ -1737,6 +1858,91 @@ def _dim_one_view(ms, doc, geo, bbox, stats, opts, paper='A3', text_h=3.5):
                     stats['skipped'] += 1
             gk += 1
 
+    # ---------- 角度尺寸 ----------
+    # 用户要求：「如果有角度什么的也要考虑进去」。
+    # 做法：找**共享端点**的两条直线，算夹角，夹在 10°~170° 之间才算真角度
+    # （0°/180° 是共线，不标）。每个视图最多标 max_angles 个，避免糊成一片。
+    if opts.get('dimAngles', True):
+        max_angles = int(opts.get('maxAngles')
+                         or (1 if opts.get('assemblyMode') else 2))
+        segs = []
+        for x1, y1, x2, y2, obj in geo.get('lines', []):
+            if math.hypot(x2 - x1, y2 - y1) < max(2.0, text_h * 0.6):
+                continue
+            segs.append((x1, y1, x2, y2))
+        joint_tol = max(0.4, tol * 1.5)
+        made_angles = 0
+        used_pts = []
+        for i in range(len(segs)):
+            if made_angles >= max_angles:
+                break
+            a = segs[i]
+            for j in range(i + 1, len(segs)):
+                if made_angles >= max_angles:
+                    break
+                b = segs[j]
+                # 找共享端点（四种组合）
+                pair = None
+                for pa in ((a[0], a[1]), (a[2], a[3])):
+                    for pb in ((b[0], b[1]), (b[2], b[3])):
+                        if (abs(pa[0] - pb[0]) <= joint_tol
+                                and abs(pa[1] - pb[1]) <= joint_tol):
+                            pair = (pa, pb)
+                            break
+                    if pair:
+                        break
+                if not pair:
+                    continue
+                vx, vy = pair[0]
+                # 两个方向（从顶点向外）
+                da = (a[2] - a[0], a[3] - a[1])
+                db = (b[2] - b[0], b[3] - b[1])
+                if (abs(da[0]) < 1e-9 and abs(da[1]) < 1e-9):
+                    continue
+                if (abs(db[0]) < 1e-9 and abs(db[1]) < 1e-9):
+                    continue
+                # 让方向从顶点指出去
+                if (da[0] * (vx - a[0]) + da[1] * (vy - a[1])) > 0:
+                    da = (-da[0], -da[1])
+                if (db[0] * (vx - b[0]) + db[1] * (vy - b[1])) > 0:
+                    db = (-db[0], -db[1])
+                ang = math.degrees(math.acos(max(-1.0, min(1.0,
+                    (da[0] * db[0] + da[1] * db[1])
+                    / (math.hypot(*da) * math.hypot(*db))))))
+                if ang < 10.0 or ang > 170.0:
+                    continue
+                # 顶点附近已经标过就不再标
+                if any(math.hypot(vx - px, vy - py) < text_h * 3
+                       for px, py in used_pts):
+                    continue
+                la, lb = math.hypot(*da), math.hypot(*db)
+                scale = max(text_h * 3.0, min(la, lb) * 0.6)
+                p1 = (vx + da[0] / la * scale, vy + da[1] / la * scale, 0)
+                p2 = (vx + db[0] / lb * scale, vy + db[1] / lb * scale, 0)
+                # 文字放在角平分线外侧
+                bx = (da[0] / la + db[0] / lb)
+                by = (da[1] / la + db[1] / lb)
+                bl = math.hypot(bx, by) or 1.0
+                tp = (vx + bx / bl * (scale + text_h * 2.0),
+                      vy + by / bl * (scale + text_h * 2.0), 0)
+                try:
+                    d = ms.AddDimAngular(_vec((vx, vy, 0)), _vec(p1), _vec(p2),
+                                         _vec(tp))
+                    try:
+                        d.Layer = LAYER_DIM
+                        d.color = 7
+                        d.Lineweight = LW_THIN
+                        d.TextHeight = text_h
+                    except Exception:
+                        pass
+                    stats['angles'] = stats.get('angles', 0) + 1
+                    made_angles += 1
+                    used_pts.append((vx, vy))
+                except Exception:
+                    stats['skipped'] += 1
+        if made_angles:
+            emit({'stage': 'acad_angles', 'count': made_angles})
+
     # ---------- 辅助框：画出来校验排布，再删掉 ----------
     if show_guide and placed:
         # 辅助框只画「尺寸线+文字」的紧凑条带，不含尺寸界线。
@@ -1887,6 +2093,19 @@ def auto_dimension(doc, opts=None):
                 counts = classify_into_layers(doc, view_boxes, paper_w, paper_h,
                                               bom_box=opts.get('bomBoxMm'))
                 emit({'stage': 'acad_layers', 'counts': counts})
+
+            # ⑬ 分完图层**之后**再建 GB 标注样式
+            if opts.get('setupStyleInside'):
+                try:
+                    sn, vok = setup_gb_dimstyle(
+                        doc, 'GB',
+                        scale_den=opts.get('scaleDen'),
+                        scale_num=opts.get('scaleNum') or 1)
+                    emit({'stage': 'acad_style', 'style': sn, 'vars': vok})
+                    opts = {**opts, 'styleName': sn}
+                except Exception as exc:
+                    emit({'stage': 'acad_style', 'error': str(exc)})
+
             view_layers = [n for n in counts if n.startswith('DSH_VIEW_')]
             if view_layers and opts.get('moveViews', True):
                 layout_placed = move_views_by_layer(
@@ -2019,42 +2238,22 @@ def auto_dimension(doc, opts=None):
     # 看图时极易误判成「没标注」。原因是 dim 实体在创建时把当时的
     # 标注样式高度烘进了自身属性，之后改 DIMTXT 不会回溯修改已有实体。
     # 所以这里逐个实体覆盖，保证和 text_h 一致。
-    fixed_heights = 0
+    # ① 统一颜色/线宽/字高/小数位
     try:
-        for i in range(ms.Count):
-            try:
-                e = ms.Item(i)
-                if 'Dimension' not in str(e.ObjectName):
-                    continue
-                try:
-                    if abs(float(e.TextHeight) - text_h) > 1e-6:
-                        e.TextHeight = text_h
-                        fixed_heights += 1
-                except Exception:
-                    pass
-                # 颜色也强制显式（ByBlock 单色打印会变白 → 打不出字）
-                try:
-                    e.color = 7
-                except Exception:
-                    pass
-                # 小数位：GB 工程图一般用整数；非整数保留 2 位。
-                # 和字高一样，DIMDEC 在实体创建时烘进了自身，
-                # 后改系统变量不生效（实测显示成 93.4010 四位小数）。
-                try:
-                    val = float(e.Measurement)
-                    if abs(val - round(val)) < 0.005:
-                        e.PrimaryUnitsPrecision = 0      # acDimPrecisionZero
-                    else:
-                        e.PrimaryUnitsPrecision = 2      # acDimPrecisionTwo
-                except Exception:
-                    pass
-            except Exception:
-                continue
-    except Exception:
-        pass
-    if fixed_heights:
-        emit({'stage': 'acad_text_height_fixed', 'count': fixed_heights,
-              'height': text_h})
+        norm = normalize_dimension_style(doc, text_h=text_h)
+        emit({'stage': 'acad_dim_style', **norm})
+    except Exception as exc:
+        emit({'stage': 'acad_dim_style', 'ok': False, 'error': str(exc)})
+
+    # ② 遮挡检查 + 挪位置，**多轮**（用户要求「多次检查」）
+    try:
+        rounds = int(opts.get('overlapRounds', 3))
+        ov = resolve_dimension_overlaps(doc, text_h=text_h, rounds=rounds)
+        emit({'stage': 'acad_overlap', **ov})
+        # 挪完再统一一次样式（挪动后个别属性可能被重置）
+        normalize_dimension_style(doc, text_h=text_h)
+    except Exception as exc:
+        emit({'stage': 'acad_overlap', 'ok': False, 'error': str(exc)})
 
     # 收尾：清掉辅助层残留，保证正式图面干净
     try:
@@ -2093,33 +2292,21 @@ def dimension_dwg(dwg_path, opts=None, visible=False, out_path=None, exe_hint=No
         if pw:
             opts = {**opts, 'paperW': pw, 'paperH': ph}
 
-        # ★ 顺序修正（用户指出 13/14 反了）：**先分图层，再建标注样式**。
-        # 分图层要靠三样框：① 每个视图的包围框 ② 工程图图框（纸面边界）
-        # ③ 明细表框（装配图）。三样都在这里一次性给全，后面标注阶段
-        # 直接复用结果，不再重复分类。
-        view_boxes = opts.get('viewBoxes')
-        if view_boxes and opts.get('layoutByLayer', True):
-            try:
-                counts = classify_into_layers(
-                    doc, view_boxes, pw, ph,
-                    bom_box=opts.get('bomBoxMm'))
-                emit({'stage': 'acad_layers', 'counts': counts,
-                      'boxes': {'views': len(view_boxes),
-                                'frame': [0, 0, pw, ph],
-                                'bom': opts.get('bomBoxMm')}})
-                opts = {**opts, 'preClassified': counts}
-            except Exception as exc:
-                emit({'stage': 'acad_layers', 'error': str(exc)})
-
-        # 图层建好之后再建 GB 标注样式
+        # 顺序（用户要求）：⑭ 先分图层 → ⑬ 再建标注样式 → ⑮ 再移动视图。
+        # 注意：**分图层必须在 auto_dimension 内部做**，不能提前到打开文档后，
+        # 否则图框/标题栏图元分类会退化（实测 DSH_FRAME 从 51 个掉到 4 个，
+        # 图框全留在 0 层，最后打印出来是一张白图）。
+        # 所以这里只把「比例」传进去，让 auto_dimension 在分完图层后建样式。
         scale_den = opts.get('scaleDen') or opts.get('scale_den')
         scale_num = opts.get('scaleNum') or opts.get('scale_num') or 1
-        style_name, var_ok = setup_gb_dimstyle(
-            doc, 'GB', scale_den=scale_den, scale_num=scale_num)
-        emit({'stage': 'acad_style', 'style': style_name, 'vars': var_ok})
+        opts = {**opts,
+                'setupStyleInside': True,
+                'scaleDen': scale_den,
+                'scaleNum': scale_num}
 
         stats = auto_dimension(doc, opts)
         emit({'stage': 'acad_dimensioned', **stats})
+        style_name = stats.get('styleName') or 'GB'
 
         target = os.path.abspath(out_path or dwg_path)
         if os.path.abspath(dwg_path).lower() == target.lower():
