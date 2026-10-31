@@ -125,6 +125,51 @@ def open_or_activate(acad, dwg_path):
     return acad.ActiveDocument
 
 
+def close_document(dwg_path, exe_hint=None):
+    """关掉指定的 DWG 文档（不动 AutoCAD 进程，也不碰用户自己的图）。
+
+    用户要求：「打开过的界面如果后续用不上了，就顺带关掉」——
+    出图/标注/打印完成后，这些 DWG 窗口留着只是占内存。
+    返回 (是否关了, 说明)
+    """
+    try:
+        acad, _ = connect(exe_hint=exe_hint)
+    except Exception as exc:
+        return False, f'连不上 AutoCAD: {exc}'
+
+    target = os.path.normcase(os.path.abspath(dwg_path))
+    target_name = os.path.basename(dwg_path)
+    try:
+        count = acad.Documents.Count
+    except Exception:
+        count = 0
+
+    for i in range(count - 1, -1, -1):
+        try:
+            d = acad.Documents.Item(i)
+        except Exception:
+            continue
+        hit = False
+        try:
+            fp = d.FullName or ''
+            if fp:
+                hit = os.path.normcase(os.path.abspath(fp)) == target
+        except Exception:
+            pass
+        if not hit:
+            try:
+                hit = (d.Name or '') == target_name
+            except Exception:
+                hit = False
+        if hit:
+            try:
+                d.Close(False)   # False = 不保存提示，直接关
+                return True, '已关闭'
+            except Exception as exc:
+                return False, f'关闭失败: {exc}'
+    return False, '未找到已打开的文档'
+
+
 def _bbox(e):
     try:
         mn = VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, (0.0, 0.0, 0.0))
