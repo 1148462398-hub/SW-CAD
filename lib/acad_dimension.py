@@ -1034,6 +1034,143 @@ def _place_avoiding(rect, target, reserved, placed, bounds, pad=6.0,
     return tx, ty, {'shifted': tries, 'reason': 'clamped'}
 
 
+def layout_views_gb_even(doc, view_layers, paper='A3', landscape=True,
+                         reserved=None, gap_mm=12.0, margin_mm=10.0):
+    """按国标相对位置排视图，并在可用区域内**平均分布 + 整体居中**。
+
+    用户要求：「让视图在图框上平均分布，尽量不要侵入到左下角区域，
+    那个是给技术要求留的位置」。
+
+    排布规则（第一角投影）：
+      · 主视图（面积最大）在左下基准位
+      · 宽而扁的视图（俯视图）→ 主视图**正下方**，中心 x 对齐（长对正）
+      · 高而窄的视图（右视图）  → 主视图**右侧**，中心 y 对齐（高平齐）
+      · 其余（剖视/轴测）       → 最右一列往右排
+
+    可用区 = 图框内框 - reserved(标题栏/技术要求区/明细表)。
+    reserved 里凡是贴底的（ry0 ≈ 底边），就把可用区底边抬到它的顶边之上，
+    这样左下角的技术要求区天然不会被侵入。
+
+    返回 {layer: {target:[cx,cy], size:[w,h], moved:n, slot:...}}
+    """
+    ms = doc.ModelSpace
+
+    # ---- 1. 量每个视图的实际包围盒 ----
+    items = []
+    for nm in view_layers:
+        x0 = y0 = 1e18
+        x1 = y1 = -1e18
+        n = 0
+        for i in range(ms.Count):
+            try:
+                e = ms.Item(i)
+                if str(e.Layer) != nm:
+                    continue
+            except Exception:
+                continue
+            bb = _entity_bbox(e, str(e.ObjectName))
+            if bb:
+                x0 = min(x0, bb[0]); y0 = min(y0, bb[1])
+                x1 = max(x1, bb[2]); y1 = max(y1, bb[3])
+                n += 1
+        if n and x1 > x0:
+            items.append({'layer': nm,
+                          'cx': (x0 + x1) / 2.0, 'cy': (y0 + y1) / 2.0,
+                          'w': x1 - x0, 'h': y1 - y0})
+    if not items:
+        return {}
+
+    # ---- 2. 主视图 = 面积最大 ----
+    items.sort(key=lambda t: -(t['w'] * t['h']))
+    main = items[0]
+    rest = items[1:]
+
+    # ---- 3. 分类：宽扁→下方　窄高→右侧　其余→再往右 ----
+    below, right, extra = [], [], []
+    for t in rest:
+        rw = t['w'] / max(main['w'], 1e-6)
+        rh = t['h'] / max(main['h'], 1e-6)
+        if rh < 0.45 and rw > 0.45:
+            below.append(t)
+        elif rw < 0.45 and rh > 0.45:
+            right.append(t)
+        else:
+            extra.append(t)
+
+    # ---- 4. 相对位置（以主视图左下角为原点）----
+    pos = {main['layer']: (0.0, 0.0)}
+    y = 0.0 - gap_mm
+    for t in below:                                   # 长对正
+        pos[t['layer']] = ((main['w'] - t['w']) / 2.0, y - t['h'])
+        y -= (t['h'] + gap_mm)
+    x = main['w'] + gap_mm
+    for t in right:                                   # 高平齐
+        pos[t['layer']] = (x, (main['h'] - t['h']) / 2.0)
+        x += t['w'] + gap_mm
+    for t in extra:                                   # 其余靠右顶对齐
+        pos[t['layer']] = (x, main['h'] - t['h'])
+        x += t['w'] + gap_mm
+
+    # ---- 5. 整体包围盒 ----
+    bx0 = by0 = 1e18
+    bx1 = by1 = -1e18
+    for t in items:
+        px, py = pos[t['layer']]
+        bx0 = min(bx0, px); by0 = min(by0, py)
+        bx1 = max(bx1, px + t['w']); by1 = max(by1, py + t['h'])
+
+    # ---- 6. 可用区（图框内框 - 贴底的预留区）----
+    pw, ph = paper_size_mm(paper, landscape)
+    ux0, uy0, ux1, uy1 = 25.0, 5.0, pw - 5.0, ph - 5.0
+    for r in (reserved or []):
+        if not r or len(r) < 4:
+            continue
+        ry0 = float(r[1]); ry1 = float(r[3])
+        if ry0 <= uy0 + 1.0:            # 贴底的（标题栏 / 技术要求区）
+            uy0 = max(uy0, ry1 + margin_mm)
+
+    # ---- 7. 居中 ----
+    bw = bx1 - bx0
+    bh = by1 - by0
+    ox = ux0 + max(0.0, ((ux1 - ux0) - bw) / 2.0)
+    oy = uy0 + max(0.0, ((uy1 - uy0) - bh) / 2.0)
+
+    # ---- 8. 实际搬动 ----
+    placed = {}
+    for t in items:
+        px, py = pos[t['layer']]
+        nx = px - bx0 + ox
+        ny = py - by0 + oy
+        tcx = nx + t['w'] / 2.0
+        tcy = ny + t['h'] / 2.0
+        dx, dy = tcx - t['cx'], tcy - t['cy']
+        moved = 0
+        for i in range(ms.Count):
+            try:
+                e = ms.Item(i)
+                if str(e.Layer) != t['layer']:
+                    continue
+                e.Move(_vec((0, 0, 0)), _vec((dx, dy, 0)))
+                moved += 1
+            except Exception:
+                pass
+        if t is main:
+            slot = 'main'
+        elif t in below:
+            slot = 'below(长对正)'
+        elif t in right:
+            slot = 'right(高平齐)'
+        else:
+            slot = 'extra'
+        placed[t['layer']] = {
+            'target': [round(tcx, 1), round(tcy, 1)],
+            'size': [round(t['w'], 1), round(t['h'], 1)],
+            'moved': moved,
+            'slot': slot,
+        }
+    return placed
+
+
 def move_views_by_layer(doc, view_layers, paper='A3', landscape=True,
                         title_h=55.0, order=None, reserved=None,
                         gap_mm=6.0):
@@ -2252,16 +2389,37 @@ def auto_dimension(doc, opts=None):
                 reserved = []
                 if tb:
                     reserved.append([float(v) for v in tb])
+
+                # ★ 左下角「技术要求」预留区：标题栏左侧、贴底的那一长条。
+                #   用户明确说「不要侵入左下角区域，那是给技术要求留的位置」。
+                #   没有显式给就用标题栏反推：从左内框边到标题栏左侧，底边到标题栏顶。
+                tech = opts.get('techReqRect')
+                if tech:
+                    reserved.append([float(v) for v in tech])
+                elif tb:
+                    tech = [25.0, 5.0, max(26.0, float(tb[0]) - 8.0), float(tb[3])]
+                    reserved.append(tech)
                 reserved.extend([list(r) for r in (opts.get('reservedRects') or [])])
+
                 emit({'stage': 'acad_title_box',
                       'source': 'measured' if tb_measured else 'estimate',
                       'boxMm': [round(float(v), 1) for v in tb] if tb else None})
+                emit({'stage': 'acad_tech_req_box',
+                      'boxMm': [round(float(v), 1) for v in tech] if tech else None})
 
-                layout_placed = move_views_by_layer(
-                    doc, view_layers, paper, landscape,
-                    title_h=float(opts.get('titleBlockMm', 55.0)),
-                    reserved=reserved,
-                    gap_mm=float(opts.get('viewGapMm', 6.0)))
+                # 平均分布布局（GB 相对位置 + 整体居中）；关掉时退回旧的分槽摆法
+                if opts.get('layoutEven', True):
+                    layout_placed = layout_views_gb_even(
+                        doc, view_layers, paper, landscape,
+                        reserved=reserved,
+                        gap_mm=float(opts.get('viewGapMm', 12.0)),
+                        margin_mm=float(opts.get('layoutMarginMm', 10.0)))
+                else:
+                    layout_placed = move_views_by_layer(
+                        doc, view_layers, paper, landscape,
+                        title_h=float(opts.get('titleBlockMm', 55.0)),
+                        reserved=reserved,
+                        gap_mm=float(opts.get('viewGapMm', 6.0)))
                 emit({'stage': 'acad_layout_by_layer',
                       'placed': layout_placed,
                       'reserved': reserved})
