@@ -1035,7 +1035,8 @@ def _place_avoiding(rect, target, reserved, placed, bounds, pad=6.0,
 
 
 def layout_views_gb_even(doc, view_layers, paper='A3', landscape=True,
-                         reserved=None, gap_mm=12.0, margin_mm=10.0):
+                         reserved=None, gap_mm=30.0, margin_mm=10.0,
+                         fill=0.85, min_gap_mm=30.0, dim_band_mm=18.0):
     """按国标相对位置排视图，并在可用区域内**平均分布 + 整体居中**。
 
     用户要求：「让视图在图框上平均分布，尽量不要侵入到左下角区域，
@@ -1050,6 +1051,11 @@ def layout_views_gb_even(doc, view_layers, paper='A3', landscape=True,
     可用区 = 图框内框 - reserved(标题栏/技术要求区/明细表)。
     reserved 里凡是贴底的（ry0 ≈ 底边），就把可用区底边抬到它的顶边之上，
     这样左下角的技术要求区天然不会被侵入。
+
+    铺开策略（用户要求「得铺开，不能影响标注」）：
+      视图尺寸不变，把**间隙**当未知数解出来，让整块恰好占可用区的 fill 比例，
+      再四周等边距居中（= 距各边距离取中值）。
+      gx = (可用宽×fill - Σ列宽) / (列数-1)，gy 同理；下限 min_gap_mm。
 
     返回 {layer: {target:[cx,cy], size:[w,h], moved:n, slot:...}}
     """
@@ -1097,29 +1103,10 @@ def layout_views_gb_even(doc, view_layers, paper='A3', landscape=True,
         else:
             extra.append(t)
 
-    # ---- 4. 相对位置（以主视图左下角为原点）----
-    pos = {main['layer']: (0.0, 0.0)}
-    y = 0.0 - gap_mm
-    for t in below:                                   # 长对正
-        pos[t['layer']] = ((main['w'] - t['w']) / 2.0, y - t['h'])
-        y -= (t['h'] + gap_mm)
-    x = main['w'] + gap_mm
-    for t in right:                                   # 高平齐
-        pos[t['layer']] = (x, (main['h'] - t['h']) / 2.0)
-        x += t['w'] + gap_mm
-    for t in extra:                                   # 其余靠右顶对齐
-        pos[t['layer']] = (x, main['h'] - t['h'])
-        x += t['w'] + gap_mm
-
-    # ---- 5. 整体包围盒 ----
-    bx0 = by0 = 1e18
-    bx1 = by1 = -1e18
-    for t in items:
-        px, py = pos[t['layer']]
-        bx0 = min(bx0, px); by0 = min(by0, py)
-        bx1 = max(bx1, px + t['w']); by1 = max(by1, py + t['h'])
-
-    # ---- 6. 可用区（图框内框 - 贴底的预留区）----
+    # ---- 4. 先算可用区，再解算「铺开」的间隙 ----
+    # 用户要求：「靠太近了…得铺开，不能影响标注」。
+    # 做法：视图尺寸固定，把**间隙**当未知数，让整块恰好铺满可用区的 fill 比例，
+    # 再四周等边距居中（= 距各边的距离取中值）。
     pw, ph = paper_size_mm(paper, landscape)
     ux0, uy0, ux1, uy1 = 25.0, 5.0, pw - 5.0, ph - 5.0
     for r in (reserved or []):
@@ -1128,6 +1115,60 @@ def layout_views_gb_even(doc, view_layers, paper='A3', landscape=True,
         ry0 = float(r[1]); ry1 = float(r[3])
         if ry0 <= uy0 + 1.0:            # 贴底的（标题栏 / 技术要求区）
             uy0 = max(uy0, ry1 + margin_mm)
+        # 贴右的（明细表）→ 右边内缩
+        if float(r[2]) >= ux1 - 1.0 and float(r[1]) <= uy0 + 1.0:
+            pass
+    usable_w = max(1.0, ux1 - ux0)
+    usable_h = max(1.0, uy1 - uy0)
+
+    # 列：主视图那一列 | 右侧各视图
+    # ★ 每个视图都按「视图本体 + 四周标注带」的**单元格**参与排版。
+    #   否则视图会贴到图框边上，标注线往外一伸就压线（用户要求「不能影响标注」）。
+    band = max(0.0, float(dim_band_mm))
+
+    def _ew(t):
+        return t['w'] + 2.0 * band
+
+    def _eh(t):
+        return t['h'] + 2.0 * band
+
+    cols = [main] + right + extra
+    sum_w = sum(_ew(t) for t in cols)
+    n_gapx = max(1, len(cols) - 1)
+
+    # 行：主视图那一行 | 下方各视图
+    rows = [main] + below
+    sum_h = sum(_eh(t) for t in rows)
+    n_gapy = max(1, len(rows) - 1)
+
+    # 解算间隙：整块 = 可用区 * fill
+    gap_x = (usable_w * fill - sum_w) / n_gapx
+    gap_y = (usable_h * fill - sum_h) / n_gapy
+    # 不能小于最小间隙（给标注留空间），也不能大到把视图冲散
+    gap_x = max(min_gap_mm, min(gap_x, usable_w * 0.45))
+    gap_y = max(min_gap_mm, min(gap_y, usable_h * 0.45))
+
+    # ---- 5. 相对位置（单元格坐标，以主视图单元格左下角为原点）----
+    pos = {main['layer']: (0.0, 0.0)}
+    y = 0.0 - gap_y
+    for t in below:                                   # 长对正
+        pos[t['layer']] = ((_ew(main) - _ew(t)) / 2.0, y - _eh(t))
+        y -= (_eh(t) + gap_y)
+    x = _ew(main) + gap_x
+    for t in right:                                   # 高平齐
+        pos[t['layer']] = (x, (_eh(main) - _eh(t)) / 2.0)
+        x += _ew(t) + gap_x
+    for t in extra:                                   # 其余靠右顶对齐
+        pos[t['layer']] = (x, _eh(main) - _eh(t))
+        x += _ew(t) + gap_x
+
+    # ---- 6. 整体包围盒（按单元格）----
+    bx0 = by0 = 1e18
+    bx1 = by1 = -1e18
+    for t in items:
+        px, py = pos[t['layer']]
+        bx0 = min(bx0, px); by0 = min(by0, py)
+        bx1 = max(bx1, px + _ew(t)); by1 = max(by1, py + _eh(t))
 
     # ---- 7. 居中 ----
     bw = bx1 - bx0
@@ -1139,8 +1180,9 @@ def layout_views_gb_even(doc, view_layers, paper='A3', landscape=True,
     placed = {}
     for t in items:
         px, py = pos[t['layer']]
-        nx = px - bx0 + ox
-        ny = py - by0 + oy
+        # 单元格坐标 → 视图本体坐标：各边留出 band 给标注
+        nx = px - bx0 + ox + band
+        ny = py - by0 + oy + band
         tcx = nx + t['w'] / 2.0
         tcy = ny + t['h'] / 2.0
         dx, dy = tcx - t['cx'], tcy - t['cy']
@@ -2412,8 +2454,11 @@ def auto_dimension(doc, opts=None):
                     layout_placed = layout_views_gb_even(
                         doc, view_layers, paper, landscape,
                         reserved=reserved,
-                        gap_mm=float(opts.get('viewGapMm', 12.0)),
-                        margin_mm=float(opts.get('layoutMarginMm', 10.0)))
+                        gap_mm=float(opts.get('viewGapMm', 30.0)),
+                        margin_mm=float(opts.get('layoutMarginMm', 10.0)),
+                        fill=float(opts.get('layoutFill', 0.85)),
+                        min_gap_mm=float(opts.get('viewMinGapMm', 30.0)),
+                        dim_band_mm=float(opts.get('dimBandMm', 18.0)))
                 else:
                     layout_placed = move_views_by_layer(
                         doc, view_layers, paper, landscape,
