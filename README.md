@@ -8,6 +8,51 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.16.1（当前）
+
+**修「自动发送失败：conversation.send requires a session scope」。**
+
+用户点「交给本鱼出图」时报这个错。
+
+**根因**：面板注册在 **root 作用域**（`main` slot 的 `scope: 'root'`），没有会话绑定。
+客户端 `ctx.conversation.send()` 内部会走 `scopeId()`：
+
+```js
+scopeId(op) {
+  const id = this.requireSessions().scopeOf(this.ctx)
+  if (id === undefined)
+    throw new Error(`conversation.${op} requires a session scope — address one via ctx.sessions.scope(id).conversation`)
+}
+```
+
+root 作用域下 `scopeOf()` 返回 undefined，所以必炸。
+
+**修法：改由宿主投递。**
+
+宿主侧 `ctx.sessions` 有完整会话表（`list()` / `get(id)`），能定位活动会话。
+新增一条 HTTP 路由：
+
+```
+POST /api/send-to-agent   { text }
+  → 取 sessions.list() 里 seq 最大（最近活跃）的那个会话
+  → session.prompt([{type:'text',text}], 'queue')
+```
+
+客户端 `dispatchToAgent` 改成调这个接口，失败才回退到「复制指令手动粘贴」。
+
+同时清掉了不再使用的 `conversationService` 和 `inject: ['conversation']` 依赖。
+
+**端到端验证**（事件流桩模拟真实 req/res）：
+
+```
+✓ 路由已注册
+状态码: 200
+宿主 prompt 调用: 1 次
+  内容: "测试指令：给机架出图"
+  模式: queue
+```
+
+### v0.16.0
 ### v0.16.0（当前）
 
 **面板精简：路径探测和出图全交给 AI，面板只留参数 + 一个出图键。**
