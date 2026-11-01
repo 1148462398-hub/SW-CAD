@@ -2839,6 +2839,27 @@ def dimension_dwg(dwg_path, opts=None, visible=False, out_path=None, exe_hint=No
             doc.Close(False)
         except Exception:
             pass
+
+        # ★ 清理 AutoCAD 保存时留下的 saveNNNN.tmp ★
+        # COM 的 doc.Save() 会在同目录生成这种临时文件（实测每个出图目录
+        # 都躺着一个 33~77KB 的 saveXXXX.tmp，用户翻目录时会被它干扰）。
+        # 只删自己目录下的、名字符合 save<数字>.tmp 的，别误删用户的文件。
+        try:
+            import re as _re
+            _dir = os.path.dirname(os.path.abspath(target)) or '.'
+            _n = 0
+            for _f in os.listdir(_dir):
+                if _re.fullmatch(r'save\d+\.tmp', _f, _re.IGNORECASE):
+                    try:
+                        os.remove(os.path.join(_dir, _f))
+                        _n += 1
+                    except Exception:
+                        pass
+            if _n:
+                emit({'stage': 'acad_tmp_cleaned', 'removed': _n})
+        except Exception as exc:
+            emit({'stage': 'acad_tmp_cleaned', 'error': str(exc)})
+
         return {'ok': True, 'stats': stats, 'style': style_name,
                 'out': target, 'dxf': dxf_out, 'dxfOk': dxf_ok}
     finally:
