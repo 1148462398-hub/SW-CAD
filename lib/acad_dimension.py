@@ -611,7 +611,8 @@ def align_views_gb(doc, placed, tol=0.5, reserved=None):
             'skipped': skipped}
 
 
-def resolve_dimension_overlaps(doc, text_h=3.5, rounds=3, gap_mm=1.0):
+def resolve_dimension_overlaps(doc, text_h=3.5, rounds=3, gap_mm=1.0,
+                               view_layers=None):
     """检查标注文字是否互相遮挡；遮挡就挪位置。**多轮**直到稳定。
 
     用户要求：「19 后面应该加一个检查是否有遮挡，如果遮挡要调整标注位置，
@@ -632,6 +633,15 @@ def resolve_dimension_overlaps(doc, text_h=3.5, rounds=3, gap_mm=1.0):
     used_rounds = 0
     tw = text_h * 0.62      # 每个字符宽度的粗略估计
     pad = max(0.6, gap_mm)
+
+    # ★ 视图本体区域：标注文字**不能压在图形上**（GB 要求尺寸数字不被图线穿过）。
+    #   实测剖视图那几个尺寸（56.15/37.86/18.29）全挤在斜剖面线里，读不清。
+    #   这里把每个视图层的包围盒（内缩一点）当禁区，文字框撞进去就往外推。
+    view_rects = []
+    for lay in (view_layers or []):
+        bb = layer_bbox(doc, lay)
+        if bb and (bb[2] - bb[0]) > 1.0 and (bb[3] - bb[1]) > 1.0:
+            view_rects.append((bb[0], bb[1], bb[2], bb[3]))
 
     for r in range(int(rounds)):
         used_rounds = r + 1
@@ -661,6 +671,53 @@ def resolve_dimension_overlaps(doc, text_h=3.5, rounds=3, gap_mm=1.0):
 
         moved_this = 0
         conflicts = 0
+
+        # ---- ① 先把压在视图本体上的文字推出去 ----
+        # GB 要求尺寸数字不被图线穿过。实测剖视图的 56.15/37.86/18.29
+        # 全挤在斜剖面线里，根本读不清。
+        #
+        # ⚠ 特殊情况：**窄视图**（5mm 厚的板）宽度比文字还小，
+        #   往左右推根本推不出去（文字必然横跨整个视图）。
+        #   这种视图必须**上下推**（沿长边方向），把文字甩到轮廓外面。
+        for it in items:
+            for vr in view_rects:
+                if not _rects_overlap(it['box'], vr, pad):
+                    continue
+                conflicts += 1
+                cx, cy = it['cx'], it['cy']
+                hw = (it['box'][2] - it['box'][0]) / 2
+                hh = (it['box'][3] - it['box'][1]) / 2
+                vw = vr[2] - vr[0]
+                vh = vr[3] - vr[1]
+                cands = []
+                # 文字比视图「宽」→ 只能上下走；比视图「高」→ 只能左右走
+                if it['box'][2] - it['box'][0] < vw:
+                    cands.append((vr[0] - pad - hw, cy))
+                    cands.append((vr[2] + pad + hw, cy))
+                if it['box'][3] - it['box'][1] < vh:
+                    cands.append((cx, vr[1] - pad - hh))
+                    cands.append((cx, vr[3] + pad + hh))
+                if not cands:
+                    # 两边都放不下：沿**长边**甩出去
+                    if vh >= vw:
+                        cands = [(vr[0] - pad - hw, cy),
+                                 (vr[2] + pad + hw, cy)]
+                    else:
+                        cands = [(cx, vr[1] - pad - hh),
+                                 (cx, vr[3] + pad + hh)]
+                # 选「离当前位置最近」的方向（改动最小）
+                best = min(cands, key=lambda p: math.hypot(p[0] - cx, p[1] - cy))
+                try:
+                    it['e'].TextPosition = _vec((best[0], best[1], 0))
+                    it['cx'], it['cy'] = best[0], best[1]
+                    it['box'] = (best[0] - hw, best[1] - hh,
+                                 best[0] + hw, best[1] + hh)
+                    moved_this += 1
+                    moved_total += 1
+                except Exception:
+                    pass
+                break
+
         for i in range(len(items)):
             for j in range(i + 1, len(items)):
                 a, b = items[i], items[j]
@@ -2010,6 +2067,19 @@ def _dim_one_view(ms, doc, geo, bbox, stats, opts, paper='A3', text_h=3.5):
     horiz.insert(0, (xmin, xmax, (xmin, ymin), (xmax, ymin)))
     vert.insert(0, (ymin, ymax, (xmin, ymin), (xmin, ymax)))
 
+    # ★ 窄视图特殊处理（薄板件的右视图 / 俯视图）★
+    # 实测剖视图只有 5mm 宽，却在上面标了 56.15 / 37.86 / 18.29 三个线性尺寸，
+    # 尺寸界线横穿整个视图，看着就像「压在图上」，完全没法读。
+    # 规则：短边 < 8mm 时，**短边方向只保留一个总尺寸（厚度）**，长边方向正常标。
+    #   这样薄视图就是「□5 × 93.4」，干净且符合 GB「同一尺寸不重复」。
+    # 窄视图（竖条，宽 5 高 56）：水平尺寸跨度只有 5mm，标出来尺寸界线
+    # 会从图形里穿出来 —— 只留总宽；垂直方向（长边）正常标。
+    if w < 8.0:
+        horiz = [horiz[0]] if horiz else []
+    # 扁视图（横条，宽 84 高 5）：垂直尺寸跨度只有 5mm，同理只留总高。
+    if h < 8.0:
+        vert = [vert[0]] if vert else []
+
     # 限量：总长/总高 + 若干分尺寸
     horiz = horiz[:max_linear + 1]
     vert = vert[:max_linear + 1]
@@ -2224,7 +2294,12 @@ def _dim_one_view(ms, doc, geo, bbox, stats, opts, paper='A3', text_h=3.5):
                 ang = math.degrees(math.acos(max(-1.0, min(1.0,
                     (da[0] * db[0] + da[1] * db[1])
                     / (math.hypot(*da) * math.hypot(*db))))))
-                if ang < 10.0 or ang > 170.0:
+                if ang < 15.0 or ang > 165.0:
+                    continue
+                # GB/T 4458.4：**直角不标注**（90° 是默认值，标了纯属冗余）。
+                # 原来只挡 10°~170° 之外，结果 4 个视图各标 2 个 90°，
+                # 图面上一共 8 个没用的 90°，把真正的 30° 都淹没了。
+                if abs(ang - 90.0) < 1.0:
                     continue
                 # 顶点附近已经标过就不再标
                 if any(math.hypot(vx - px, vy - py) < text_h * 3
@@ -2421,7 +2496,10 @@ def auto_dimension(doc, opts=None):
                 except Exception as exc:
                     emit({'stage': 'acad_style', 'error': str(exc)})
 
+            # ⚠ view_layers 必须在 moveViews 分支**之外**也算出来，
+            #   否则不搬视图时后面遮挡检查拿不到视图禁区（NameError 或漏检）。
             view_layers = [n for n in counts if n.startswith('DSH_VIEW_')]
+
             if view_layers and opts.get('moveViews', True):
                 # ★ 标题栏避让区用**实测**包围盒，不用写死的 180×58。
                 # 本机 GB 模板实测 190.9×75.5，写死会差出 8.9 / 17.5mm，
@@ -2576,21 +2654,64 @@ def auto_dimension(doc, opts=None):
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
 
-        if w < 8.0 or h < 8.0:
+        # ⚠ 原来一刀切 `w<8 或 h<8` 就跳过，实测把「薄板件」的右视图/俯视图
+        #   全挡了：机架只有 5mm 厚，那俩视图是 5.0×93.4 和 84.0×5.0，
+        #   结果 4 个视图里只有主视图出标注（views=1）。
+        #   改成「长边够长就标」—— 薄视图一样有 φ、长度、宽度可标。
+        if max(w, h) < 20.0:
+            stats['skipped'] = stats.get('skipped', 0) + 1
             continue
         if paper_w and paper_h:
             if w > paper_w * 0.9 or h > paper_h * 0.9:
+                stats['skipped'] = stats.get('skipped', 0) + 1
                 continue
             edge = 15.0
             if (bbox[0] < edge or bbox[1] < edge
                     or bbox[2] > paper_w - edge
                     or bbox[3] > paper_h - edge):
+                stats['skipped'] = stats.get('skipped', 0) + 1
                 continue
         if stats['views'] >= max_views:
             break
 
         _dim_one_view(ms, doc, c, bbox, stats, opts, paper, text_h)
         stats['views'] += 1
+
+    # ★ 跨视图去重 ★
+    # 实测：同一块板在 4 个视图里量出来都叫「5.00」「93.40」，主视图和右视图
+    # 各标一遍 93.40、主视图和俯视图各标一遍 5.00，图面上全是重复数字。
+    # GB 原则「同一尺寸只标一次」，所以这里按数值去重，保留第一次出现的。
+    if opts.get('dedupeAcrossViews', True):
+        seen = {}
+        removed = 0
+        tol_d = 0.05
+        vals_idx = []
+        for i in range(ms.Count):
+            try:
+                e = ms.Item(i)
+                if 'Dimension' not in str(e.ObjectName):
+                    continue
+                try:
+                    v = float(e.Measurement)
+                except Exception:
+                    continue
+                vals_idx.append((round(v, 2), e))
+            except Exception:
+                continue
+        for v, e in vals_idx:
+            key = round(v / tol_d) if tol_d else v
+            if key in seen:
+                try:
+                    e.Delete()
+                    removed += 1
+                except Exception:
+                    pass
+            else:
+                seen[key] = True
+        stats['dedupeRemoved'] = removed
+        if removed:
+            emit({'stage': 'acad_dedupe_views', 'removed': removed,
+                  'kept': len(seen)})
 
     # ★ 强制统一尺寸文字高度 ★
     # 实测踩坑：尺寸建好后 TextHeight 只有 **0.18mm**（不是 DIMTXT 的 3.5），
@@ -2608,7 +2729,8 @@ def auto_dimension(doc, opts=None):
     # ② 遮挡检查 + 挪位置，**多轮**（用户要求「多次检查」）
     try:
         rounds = int(opts.get('overlapRounds', 3))
-        ov = resolve_dimension_overlaps(doc, text_h=text_h, rounds=rounds)
+        ov = resolve_dimension_overlaps(doc, text_h=text_h, rounds=rounds,
+                                        view_layers=view_layers)
         emit({'stage': 'acad_overlap', **ov})
         # 挪完再统一一次样式（挪动后个别属性可能被重置）
         normalize_dimension_style(doc, text_h=text_h)
