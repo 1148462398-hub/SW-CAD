@@ -8,7 +8,7 @@
       "verified": true,
       "verifiedAt": "2026-11-01",
       "updatedAt": "2026-11-01",
-      "version": 4,
+      "version": 5,
       "steps": [
         "连 SolidWorks（cad_draw_probe 确认路径；检测不到就让用户填或用 cad_draw_pick(kind=exe) 选）",
         "打开模型，读包围盒尺寸，按图幅选优先比例（1:1 1:2 1:2.5 1:5 1:10）",
@@ -21,8 +21,9 @@
         "关闭模型释放内存",
         "AutoCAD 打开 DWG：先按「视图框 + 工程图图框 + 明细表框」把图元分到 DSH_VIEW_n / DSH_FRAME / DSH_TITLE / DSH_BOM 图层",
         "★ 分完图层之后再建 GB 标注样式（顺序不能反，反过来图框会留在 0 层）",
-        "按图层整块平移视图进图框，避让**实测**的标题栏包围盒（不是写死的 180×58）和明细表",
-        "在 AutoCAD 里重做投影对齐：基准取面积最大的视图，上下长对正、左右高平齐；**对齐后复检避让区，会压标题栏就放弃该轴对齐**",
+        "按图层整块平移视图进图框；避让**实测**的标题栏包围盒（不是写死的 180×58）和**左下角技术要求预留区**",
+        "在 AutoCAD 里重做投影对齐：基准取面积最大的视图，上下长对正、左右高平齐；对齐后复检避让区，会压标题栏/技术要求区就放弃该轴",
+        "视图在可用区域内**平均分布**：按 GB 位置算（主视在左、俯视在下长对正、右视在右高平齐、剖视/轴测在旁），再整体居中，间隙均等",
         "补中心线（细点画线）",
         "线宽归一：轮廓 0.50、虚线/中心线/尺寸线 0.25（含 AcDbHatch 剖面线）",
         "自动标注：外形 + 直径（同直径合并成 N×φ）+ 线性 + 角度；按图纸比例取真实尺寸",
@@ -31,8 +32,8 @@
         "填标题栏，保存 DWG，再用 AutoCAD 重新导出 DXF（SolidWorks 那份是加工前的，不能用）",
         "关闭 AutoCAD 文档"
       ],
-      "notes": "易错点：① SolidWorks 不 RemoveAlignment 就设 Position 会被拉回去；② 分图层必须在 auto_dimension 内部做，提前到打开文档后会退化（DSH_FRAME 从 51 掉到 4，打印成白纸）；③ DXF 必须 AutoCAD 重新导出；④ 剖面线 AcDbHatch 也要设线宽，否则 lw=0 打印看不见；⑤ 标注样式里的 DIMTXT/DIMDEC 会烘进实体，必须逐个覆盖。 ⑥ 标题栏/明细表避让必须用实测包围盒（layer_bbox），不能按国标理论值写死；⑦ align_views_gb 对齐后要复检避让区，否则会把视图往下拉进标题栏。",
-      "improvement": "v4：标题栏避让区改为实测 DSH_TITLE 包围盒（本机 190.9×75.5，写死 180×58 会错位 8.9/17.5mm）；投影对齐增加避让复检，会压标题栏则放弃该轴对齐。",
+      "notes": "易错点：① SolidWorks 不 RemoveAlignment 就设 Position 会被拉回去；② 分图层必须在 auto_dimension 内部做，提前到打开文档后会退化（DSH_FRAME 从 51 掉到 4，打印成白纸）；③ DXF 必须 AutoCAD 重新导出；④ 剖面线 AcDbHatch 也要设线宽，否则 lw=0 打印看不见；⑤ 标注样式里的 DIMTXT/DIMDEC 会烘进实体，必须逐个覆盖。 ⑥ 标题栏/明细表避让必须用实测包围盒（layer_bbox），不能按国标理论值写死；⑦ align_views_gb 对齐后要复检避让区，否则会把视图往下拉进标题栏。 ⑧ 图框除标题栏外，**左下角是技术要求区**，也必须避让；⑨ 视图要按 GB 相对位置排（主视+俯视长对正、主视+右视高平齐），再整体居中做平均分布，不能只按象限粗放。",
+      "improvement": "v5：左下角『技术要求』区加入避让（视图不得侵入）；视图布局改为 GB 位置 + 平均分布 + 整体居中，不再按 slot 粗放摆放。",
       "tags": [
         "零件图",
         "GB",
@@ -63,6 +64,14 @@
           "firstStep": "连 SolidWorks（cad_draw_probe 确认路径；检测不到就让用户填或用 cad_draw_pick(kind=exe) 选）",
           "notes": "易错点：① SolidWorks 不 RemoveAlignment 就设 Position 会被拉回去；② 分图层必须在 auto_dimension 内部做，提前到打开文档后会退化（DSH_FRAME 从 51 掉到 4，打印成白纸）；③ DXF 必须 AutoCAD 重新导出；④ 剖面线 AcDbHatch 也要设线宽，否则 lw=0 打印看不见；⑤ 标注样式里的 DIMTXT/DIMDEC 会烘进实体，必须逐个覆盖。",
           "improvement": "v2：剖视图判断提前到插视图之后；分图层提前到建标注样式之前；分图层框含视图框/图框/明细表框。v3：新增角度标注、遮挡检测多轮挪位、标注颜色线宽统一、SW 全部 RemoveAlignment 后 CAD 重做投影对齐、预留标题栏避让区、线宽含 AcDbHatch。"
+        },
+        {
+          "version": 4,
+          "updatedAt": "2026-11-01",
+          "steps": 20,
+          "firstStep": "连 SolidWorks（cad_draw_probe 确认路径；检测不到就让用户填或用 cad_draw_pick(kind=exe) 选）",
+          "notes": "易错点：① SolidWorks 不 RemoveAlignment 就设 Position 会被拉回去；② 分图层必须在 auto_dimension 内部做，提前到打开文档后会退化（DSH_FRAME 从 51 掉到 4，打印成白纸）；③ DXF 必须 AutoCAD 重新导出；④ 剖面线 AcDbHatch 也要设线宽，否则 lw=0 打印看不见；⑤ 标注样式里的 DIMTXT/DIMDEC 会烘进实体，必须逐个覆盖。 ⑥ 标题栏/明细表避让必须用实测包围盒（layer_bbox），不能按国标理论值写死；⑦ align_views_gb 对齐后要复检避让区，否则会把视图往下拉进标题栏。",
+          "improvement": "v4：标题栏避让区改为实测 DSH_TITLE 包围盒（本机 190.9×75.5，写死 180×58 会错位 8.9/17.5mm）；投影对齐增加避让复检，会压标题栏则放弃该轴对齐。"
         }
       ]
     }
