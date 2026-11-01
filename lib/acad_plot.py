@@ -363,7 +363,7 @@ def _wait_plot_idle(doc, rounds=20, sleep=0.5):
 
 
 def export_pdf(dwg_path, pdf_path, paper=None, monochrome=True,
-               timeout_s=120, log=None, exe_hint=None):
+               timeout_s=120, log=None, exe_hint=None, box=None):
     """把一个 DWG 按「最外层包围框」打印成 PDF。
 
     参数
@@ -396,12 +396,15 @@ def export_pdf(dwg_path, pdf_path, paper=None, monochrome=True,
             result['error'] = '图纸里没有实体'
             return result
 
-        box = find_outermost_box(doc)
+        # box 参数：显式指定打印窗口（调试排版时用 —— 视图摊在框外时
+        # 默认取「最外层图框」会把框外的视图裁掉，看不到全貌）。
+        if box is None:
+            box = find_outermost_box(doc)
         if not box:
             result['error'] = '找不到最外层包围框（没有闭合多段线）'
             return result
         result['box'] = [round(v, 2) for v in box]
-        emit(f'最外层框：({box[0]:.1f},{box[1]:.1f})-({box[2]:.1f},{box[3]:.1f})')
+        emit(f'打印窗口：({box[0]:.1f},{box[1]:.1f})-({box[2]:.1f},{box[3]:.1f})')
 
         if not paper:
             paper = guess_paper(box)
@@ -445,7 +448,9 @@ def export_pdf(dwg_path, pdf_path, paper=None, monochrome=True,
             lay.UseStandardScale = True
             lay.StandardScale = 0          # 0 = 布满图纸
             lay.PlotWithLineweights = True
-            lay.PlotWithPlotStyles = True
+            # 彩色输出时**必须关掉打印样式**，否则 CTB 会把图层颜色统一掉，
+            # 出图和预览都是黑白，看不出「哪个实体在哪个图层」。
+            lay.PlotWithPlotStyles = bool(monochrome)
             if monochrome:
                 # 关键：DWG 里保留图层颜色，输出走纯黑
                 try:
