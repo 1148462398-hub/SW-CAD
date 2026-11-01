@@ -300,7 +300,25 @@ window.__ModuleLoader__.load({
       return /\.sldasm$/i.test(s)
     }
 
-    function Field(props) {
+    /** 软件状态小标签：绿=已找到，红=未找到。 */
+function swTag(name, info) {
+  const ok = Boolean(info && info.exe)
+  return h('span', {
+    title: ok ? info.exe : '未探测到（AI 出图时会自动再找一次）',
+    style: {
+      fontSize: 12,
+      padding: '2px 8px',
+      borderRadius: 10,
+      border: '1px solid ' + (ok ? '#39d35355' : '#ff7b7255'),
+      background: ok ? '#39d35318' : '#ff7b7218',
+      color: ok ? '#39d353' : '#ff7b72',
+      whiteSpace: 'nowrap',
+      cursor: 'default'
+    }
+  }, ok ? (name + ' ✓') : (name + ' ✗'))
+}
+
+function Field(props) {
       return h('div', { style: styles.row },
         h('div', { style: styles.label }, props.label),
         props.children
@@ -412,29 +430,6 @@ window.__ModuleLoader__.load({
       }, [])
 
       /** 弹 Windows 原生「选择文件夹」对话框（资源管理器那种） */
-      const pickOutDir = useCallback(async () => {
-        try {
-          setLog('正在弹出选择目录对话框（可能在任务栏里闪烁）…')
-          const r = await fetch(API + '/api/pick-folder', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ initial: '' })
-          })
-          const j = await r.json().catch(() => ({}))
-          if (!j?.ok) {
-            setLog('选择目录失败：' + (j?.error || '后端没有响应'))
-            return
-          }
-          if (j.canceled || !j.path) {
-            setLog('已取消选择目录')
-            return
-          }
-          setForm((prev) => ({ ...prev, outDir: j.path }))
-          setLog('输出目录已设为：' + j.path)
-        } catch (e) {
-          setLog('选择目录失败：' + (e?.message || e))
-        }
-      }, [])
 
       const toggleView = useCallback((key) => {
         setForm((prev) => {
@@ -469,30 +464,6 @@ window.__ModuleLoader__.load({
       }, [form.drawingTitle, set])
 
       /** 用原生对话框选软件启动程序（SLDWORKS.exe / acad.exe） */
-      const pickExe = useCallback(async (field, detectedPath) => {
-        try {
-          setLog('正在弹出选择程序对话框（可能在任务栏里闪烁）…')
-          const initial = String(detectedPath || '').replace(/[\\/][^\\/]*$/, '')
-          const r = await fetch(API + '/api/pick-file', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ kind: 'exe', initial })
-          })
-          const j = await r.json().catch(() => ({}))
-          if (!j?.ok) {
-            setLog('选择程序失败：' + (j?.error || '后端没有响应'))
-            return
-          }
-          if (j.canceled || !j.path) {
-            setLog('已取消选择程序')
-            return
-          }
-          set(field, String(j.path))
-          setLog(`${field === 'solidworksExe' ? 'SolidWorks' : 'AutoCAD'} 路径已设为：${j.path}`)
-        } catch (e) {
-          setLog('选择程序失败：' + (e?.message || e))
-        }
-      }, [set])
 
       /** 用原生对话框选模型 —— 装配体唯一正确的用法（保住零件引用） */
       const pickModelFile = useCallback(async () => {
@@ -534,136 +505,6 @@ window.__ModuleLoader__.load({
         acceptFile(f)
       }, [acceptFile])
 
-      const build = useCallback(async () => {
-        if (!file) return
-        setBusy(true)
-        setResult(null)
-        setProgress({ active: true, percent: 0, label: '准备任务', stage: 'start' })
-        /* /api/build 跑完才返回，中途状态靠轮询 /api/progress 拿 */
-        const poller = setInterval(async () => {
-          try {
-            const r = await fetch(API + '/api/progress')
-            const j = await r.json()
-            if (j?.progress) setProgress(j.progress)
-          } catch {
-            /* 忽略轮询失败 */
-          }
-        }, 800)
-        try {
-          /* 三种来源，优先级从高到低：
-             1) pickedPath —— 原生对话框选的**原始路径**（装配体必须用这个，
-                因为它依赖同目录零件；复制到 uploads 会丢引用）
-             2) file.path —— Electron/桌面端才有
-             3) 上传字节 —— 纯浏览器拖拽，落盘成副本 */
-          let modelPath = pickedPath || file.path || ''
-          if (modelPath && pickedPath) {
-            setLog(`使用原始路径：${modelPath}\n\n正在调用 SolidWorks 出图，单件约 1–4 分钟，请勿重复点击…\n`)
-          } else if (!modelPath) {
-            setLog('正在上传模型到本机…\n')
-            const up = await fetch(
-              API + '/api/upload?name=' + encodeURIComponent(file.name),
-              { method: 'POST', body: file }
-            )
-            const upJson = await up.json()
-            if (!upJson?.ok || !upJson.path) {
-              throw new Error('上传失败：' + (upJson?.error || '后端没有返回路径'))
-            }
-            modelPath = upJson.path
-            setLog(`模型已存到：${modelPath}\n\n正在调用 SolidWorks 出图，单件约 1–4 分钟，请勿重复点击…\n`)
-          } else {
-            setLog('正在调用 SolidWorks 出图，单件约 1–4 分钟，请勿重复点击…\n')
-          }
-
-          /* 输出目录：用户没填就自动建一个「出图_<模型名>」，
-             并把最终路径写进日志，避免「不知道存哪去了」。 */
-          let outDir = (form.outDir || '').trim()
-          if (!outDir) {
-            const dir = modelPath.replace(/[\\/][^\\/]+$/, '')
-            const base = String(file.name || 'model').replace(/\.[^.]+$/, '')
-            outDir = dir + '\\出图_' + base
-          }
-          setLog((prev) => prev + `输出目录：${outDir}\n\n`)
-
-          const payload = {
-            model: modelPath,
-            outDir,
-            paperSize: form.paperSize,
-            annotationStandard: form.annotationStandard,
-            solidworksExe: form.solidworksExe || '',
-            autocadExe: form.autocadExe || '',
-            landscape: form.landscape,
-            views: form.views,
-            sectionView: form.sectionMode === 'auto'
-              ? 'auto'
-              : form.sectionMode === 'on',
-            detailView: form.detailScale
-              ? { scale: Number(form.detailScale) || 2, label: 'A' }
-              : null,
-            tolerance: form.toleranceOn
-              ? {
-                  enabled: true,
-                  type: form.toleranceType,
-                  plus: Number(form.tolerancePlus) || 0.05,
-                  onlyOver: Number(form.toleranceOnlyOver) || 0
-                }
-              : { enabled: false },
-            surfaceFinish: form.roughnessOn
-              ? { enabled: true, value: form.roughnessValue }
-              : { enabled: false },
-            /* 技术要求：用户按需填，留空的项由引擎跳过 */
-            technicalRequirements: {
-              generalToleranceLevel: form.generalToleranceLevel,
-              unnotedFillet: form.unnotedFillet,
-              unnotedChamfer: form.unnotedChamfer,
-              unnotedRoughness: form.unnotedRoughness,
-              surfaceTreatment: form.surfaceTreatment,
-              extraNotes: form.techNotes
-            },
-            /* 配合公差，如 φ5.6 H7 */
-            fits: form.fitTarget && form.fitCode
-              ? { target: form.fitTarget, code: form.fitCode }
-              : null,
-            /* 夹具/基准中心线 */
-            fixture: form.fixtureCenterline
-              ? { enabled: true, note: form.fixtureNote }
-              : { enabled: false },
-            titleBlock: {
-              material: form.material,
-              title: form.drawingTitle,
-              number: form.drawingNumber,
-              revision: form.revision
-            },
-            exportDxf: form.exportDxf,
-            exportDwg: form.exportDwg,
-            acadDimension: form.acadDimension,
-            drawset: form.drawset,
-            bom: form.bom,
-            balloons: form.balloons,
-            preview: true
-          }
-          const res = await fetch(API + '/api/build', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(payload)
-          })
-          const json = await res.json()
-          setLog(json.log || (json.ok ? '完成' : '失败：' + (json.error || '')))
-          setResult(json.result ?? null)
-        } catch (error) {
-          setLog('出图失败：' + (error?.message || String(error)))
-        } finally {
-          clearInterval(poller)
-          // 最后再同步一次，确保进度条停在真实状态（成功 100% / 失败停在出错阶段）
-          try {
-            const r = await fetch(API + '/api/progress')
-            const j = await r.json()
-            if (j?.progress) setProgress(j.progress)
-          } catch {
-            /* 忽略 */
-          }
-          setBusy(false)
-        }
-      }, [file, form])
       /* 检测启动路径：按当前填的路径探测，显示实际找到的 exe 和是否在运行。
          detectOnly=true 时（打开面板自动跑一次）不写日志、不覆盖用户正在看的输出，
          只更新 detected 状态把结果展示在输入框下面。 */
@@ -867,51 +708,20 @@ window.__ModuleLoader__.load({
             )
           })(),
 
-          /* 软件启动路径 */
-          h('div', { style: styles.sectionTitle }, '软件启动路径（留空自动探测）'),
-          h('div', { style: { display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6 } },
-            h('span', { style: { fontSize: 12, opacity: 0.75, flex: '0 0 84px', paddingTop: 7 } }, 'SolidWorks'),
-            h('div', { style: { flex: 1, minWidth: 0 } },
-              h('input', {
-                style: { ...styles.input, width: '100%', boxSizing: 'border-box' },
-                placeholder: detected.solidworks?.exe || 'SLDWORKS.exe 路径（会自动探测）',
-                value: form.solidworksExe || '',
-                onChange: (e) => set('solidworksExe', e.target.value)
-              }),
-              pathHint(detected.solidworks, form.solidworksExe)
-            ),
+          /* 软件状态（路径由 AI 自动查，面板不再需要手填 / 浏览） */
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' } },
+            h('span', { style: { ...styles.sectionTitle, margin: 0 } }, '软件'),
+            swTag('SolidWorks', detected.solidworks),
+            swTag('AutoCAD', detected.autocad),
+            detected.error
+              ? h('span', { style: styles.pathHintBad }, '探测失败：' + detected.error)
+              : null,
             h('button', {
               type: 'button',
-              style: { ...styles.btnGhost, padding: '5px 12px', marginTop: 1 },
-              onClick: () => pickExe('solidworksExe', detected.solidworks?.exe)
-            }, '浏览…')
-          ),
-          h('div', { style: { display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6 } },
-            h('span', { style: { fontSize: 12, opacity: 0.75, flex: '0 0 84px', paddingTop: 7 } }, 'AutoCAD'),
-            h('div', { style: { flex: 1, minWidth: 0 } },
-              h('input', {
-                style: { ...styles.input, width: '100%', boxSizing: 'border-box' },
-                placeholder: detected.autocad?.exe || 'acad.exe 路径，也可只填安装目录',
-                value: form.autocadExe || '',
-                onChange: (e) => set('autocadExe', e.target.value)
-              }),
-              pathHint(detected.autocad, form.autocadExe)
-            ),
-            h('button', {
-              type: 'button',
-              style: { ...styles.btnGhost, padding: '5px 12px', marginTop: 1 },
-              onClick: () => pickExe('autocadExe', detected.autocad?.exe)
-            }, '浏览…')
-          ),
-          detected.error
-            ? h('div', { style: styles.pathHintBad }, '✗ 探测失败：' + detected.error)
-            : null,
-          h('div', { style: { display: 'flex', gap: 10, marginBottom: 8 } },
-            h('button', {
-              style: styles.btn(false, busy || probeBusy),
+              style: { ...styles.btnGhost, padding: '2px 10px', fontSize: 12 },
               disabled: busy || probeBusy,
               onClick: () => probePaths(false),
-              title: '按当前填的路径去探测 SolidWorks / AutoCAD，并显示找到的实际路径'
+              title: '重新探测 SolidWorks / AutoCAD（AI 出图时也会自动探测）'
             }, probeBusy ? '检测中…' : '重新检测')
           ),
 
@@ -1169,15 +979,10 @@ window.__ModuleLoader__.load({
             h('span', { style: { fontSize: 12, opacity: 0.75, flex: '0 0 76px' } }, '保存到'),
             h('input', {
               style: { ...styles.input, flex: 1, minWidth: 0 },
-              placeholder: '点右边「浏览…」选文件夹；留空 = 模型旁边',
+              placeholder: '留空 = 模型旁边的「出图_<名称>」；要改就直接说，AI 会弹选择框',
               value: form.outDir || '',
               onChange: (e) => set('outDir', e.target.value)
-            }),
-            h('button', {
-              type: 'button',
-              style: { ...styles.btnGhost, padding: '5px 12px' },
-              onClick: () => pickOutDir()
-            }, '浏览…')
+            })
           ),
           h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', margin: '0 0 4px 84px' } },
             h('button', {
@@ -1258,15 +1063,12 @@ window.__ModuleLoader__.load({
                 : '只出装配总图（含 BOM + 气泡），不拆零件图')
           ),
 
-          /* 推荐用法：生成指令交给 AI 出图（不依赖插件 HTTP 通道） */
-          h('div', { style: styles.sectionTitle }, '推荐：交给 AI 出图'),
-          h('div', { style: { fontSize: 11.5, opacity: 0.75, marginBottom: 8, lineHeight: 1.7 } },
-            '桌面应用的页面来源是 ',
-            h('code', null, 'dsh-app://'),
-            '，插件自己的 HTTP 接口在这里会被挂住，所以下面的「开始出图」按钮可能没反应。',
+          /* 出图：一切交给 AI（路径探测、出图、调标注都由 AI 做） */
+          h('div', { style: styles.sectionTitle }, '出图'),
+          h('div', { style: { fontSize: 11.5, opacity: 0.7, marginBottom: 8, lineHeight: 1.7 } },
+            '填好上面参数后点这个按钮，本鱼会自动完成：',
             h('br'),
-            '更稳的做法：填好参数后点下面这个按钮，把生成的指令粘贴到对话框发给本鱼，',
-            '本鱼用插件工具出图（这条路今晚已验证多次）。'
+            '找软件路径 → SolidWorks 出视图 → AutoCAD 分图层/排版/标注 → 出 DWG + DXF'
           ),
           h('div', { style: { display: 'flex', gap: 10, marginBottom: 8 } },
             h('button', {
@@ -1274,10 +1076,12 @@ window.__ModuleLoader__.load({
               style: styles.btn(true, busy),
               disabled: busy,
               onClick: dispatchToAgent
-            }, busy ? '发送中…' : '交给本鱼出图（自动发送）'),
+            }, busy ? '发送中…' : '交给本鱼出图'),
             h('button', {
               type: 'button',
-              style: styles.btn(false, false),
+              style: {
+                ...styles.btnGhost, padding: '0 14px', fontSize: 12
+              },
               onClick: () => { buildCommand(); setLog('指令已生成（未发送），可手动复制。') }
             }, '只生成指令')
           ),
@@ -1294,14 +1098,8 @@ window.__ModuleLoader__.load({
               })
             : null,
 
-          /* 操作 */
-          h('div', { style: styles.sectionTitle }, '或者：直接在本面板出图（HTTP 通道）'),
+          /* 出图后：打印 / 清理 */
           h('div', { style: { marginTop: 10, display: 'flex', gap: 10 } },
-            h('button', {
-              style: styles.btn(true, busy || pdfBusy || !file),
-              disabled: busy || pdfBusy || !file,
-              onClick: build
-            }, busy ? '出图中…' : '开始出图'),
             h('button', {
               style: styles.btn(false, busy || pdfBusy || !result?.dwg),
               disabled: busy || pdfBusy || !result?.dwg,
