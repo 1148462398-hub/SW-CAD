@@ -524,7 +524,7 @@ def normalize_lineweights(doc, view_layers):
             'thick': LW_THICK, 'thin': LW_THIN}
 
 
-def align_views_gb(doc, placed, tol=0.5):
+def align_views_gb(doc, placed, tol=0.5, reserved=None):
     """按国标第一角投影，把视图**重新对齐**（用户要求）。
 
     主视图为基准：
@@ -555,6 +555,7 @@ def align_views_gb(doc, placed, tol=0.5):
 
     aligned = 0
     detail = {}
+    skipped = []
     for layer, info in placed.items():
         if layer == ref_layer:
             continue
@@ -571,6 +572,23 @@ def align_views_gb(doc, placed, tol=0.5):
             ny = ry                     # 主要在左右方向 → 高平齐
         if abs(nx - tx) < tol and abs(ny - ty) < tol:
             continue
+        # ★ 对齐不能把视图挤进标题栏/明细表。
+        #   实测：主视图 y=109.7 的中心对齐把右视图往下拉了 24mm，
+        #   直接压进标题栏（标题栏实测到 y=75.5）。所以对完要复检，
+        #   撞了就放弃这一轴的对齐（宁可不对齐也不压图框）。
+        if reserved:
+            sz = info.get('size') or [0, 0]
+            w2, h2 = float(sz[0]) / 2.0, float(sz[1]) / 2.0
+            rect = [nx - w2, ny - h2, nx + w2, ny + h2]
+            for r in reserved:
+                if len(r) >= 4 and _rects_overlap(
+                        rect, (float(r[0]), float(r[1]), float(r[2]), float(r[3])), 3.0):
+                    # 退回原位置，并记下来
+                    nx, ny = tx, ty
+                    skipped.append(layer)
+                    break
+            if layer in skipped:
+                continue
         dx, dy = nx - tx, ny - ty
         moved = 0
         for i in range(ms.Count):
@@ -589,7 +607,8 @@ def align_views_gb(doc, placed, tol=0.5):
             detail[layer] = {
                 'mode': '长对正' if abs(dy) > 1e-9 else '高平齐',
                 'dx': round(dx, 2), 'dy': round(dy, 2)}
-    return {'aligned': aligned, 'detail': detail, 'reference': ref_layer}
+    return {'aligned': aligned, 'detail': detail, 'reference': ref_layer,
+            'skipped': skipped}
 
 
 def resolve_dimension_overlaps(doc, text_h=3.5, rounds=3, gap_mm=1.0):
@@ -884,6 +903,37 @@ def classify_into_layers(doc, view_boxes, paper_w, paper_h, tol=15.0,
                 pass
 
     return counts
+
+
+def layer_bbox(doc, layer):
+    """量出某个图层上所有图元的真实外包围框 (x0,y0,x1,y1) 毫米。
+
+    为什么要量：标题栏尺寸在不同 GB 模板里不一样（本机实测 **190.9×75.5**，
+    不是国标理论的 180×58）。**写死就会错位** —— 用户实测指出
+    「工程图图框是不是有点错位」，量出来左边差 +8.9mm、上边差 -17.5mm。
+    """
+    ms = doc.ModelSpace
+    x0 = y0 = 1e18
+    x1 = y1 = -1e18
+    n = 0
+    for i in range(ms.Count):
+        try:
+            e = ms.Item(i)
+            if str(e.Layer) != layer:
+                continue
+            bb = e.GetBoundingBox()
+            if not bb or len(bb) < 2:
+                continue
+            ax, ay = float(bb[0][0]), float(bb[0][1])
+            bx, by = float(bb[1][0]), float(bb[1][1])
+            x0 = min(x0, ax); y0 = min(y0, ay)
+            x1 = max(x1, bx); y1 = max(y1, by)
+            n += 1
+        except Exception:
+            continue
+    if n == 0:
+        return None
+    return [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]
 
 
 def _rects_overlap(a, b, pad=0.0):
@@ -2194,18 +2244,31 @@ def auto_dimension(doc, opts=None):
 
             view_layers = [n for n in counts if n.startswith('DSH_VIEW_')]
             if view_layers and opts.get('moveViews', True):
+                # ★ 标题栏避让区用**实测**包围盒，不用写死的 180×58。
+                # 本机 GB 模板实测 190.9×75.5，写死会差出 8.9 / 17.5mm，
+                # 用户一眼就能看出「工程图图框有点错位」。
+                tb_measured = layer_bbox(doc, LAYER_TITLE)
+                tb = tb_measured or opts.get('titleRectEstimate')
+                reserved = []
+                if tb:
+                    reserved.append([float(v) for v in tb])
+                reserved.extend([list(r) for r in (opts.get('reservedRects') or [])])
+                emit({'stage': 'acad_title_box',
+                      'source': 'measured' if tb_measured else 'estimate',
+                      'boxMm': [round(float(v), 1) for v in tb] if tb else None})
+
                 layout_placed = move_views_by_layer(
                     doc, view_layers, paper, landscape,
                     title_h=float(opts.get('titleBlockMm', 55.0)),
-                    reserved=opts.get('reservedRects') or [],
+                    reserved=reserved,
                     gap_mm=float(opts.get('viewGapMm', 6.0)))
                 emit({'stage': 'acad_layout_by_layer',
                       'placed': layout_placed,
-                      'reserved': opts.get('reservedRects') or []})
+                      'reserved': reserved})
                 # ★ 在 AutoCAD 里重新做投影对齐（长对正 / 高平齐）
                 if opts.get('alignViews', True):
                     try:
-                        al = align_views_gb(doc, layout_placed)
+                        al = align_views_gb(doc, layout_placed, reserved=reserved)
                         emit({'stage': 'acad_align', **al})
                     except Exception as exc:
                         emit({'stage': 'acad_align', 'ok': False,
