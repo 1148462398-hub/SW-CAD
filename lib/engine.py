@@ -2818,15 +2818,19 @@ def build(payload):
     # 实测右视图直接压进标题栏（用户截图指出「包围框还是有侵入」）。
     reserved_for_layout = []
     bom_box_mm = None
+    # ★ 标题栏预留区：这里只是**估算**（按 GB 理论 180×58）。
+    # 真实模板尺寸不一样（本机实测 190.9×75.5），写死会错位 —— 用户实测
+    # 指出「工程图图框是不是有点错位」，量出来左边差 +8.9mm、上边差 -17.5mm。
+    # 所以把它单独传给 AutoCAD 那段，那边会**实测 DSH_TITLE 的包围盒**优先用。
+    title_rect_est = None
     try:
         _pw, _ph = PAPER_SIZE_M.get(str(paper).upper(), (0.420, 0.297))
         _pw_mm = _pw * 1000.0 if landscape else _ph * 1000.0
         _ph_mm = _ph * 1000.0 if landscape else _pw * 1000.0
-        # GB 标题栏：右下角，宽约 180mm、高约 56mm
-        reserved_for_layout.append(
-            (max(0.0, _pw_mm - 182.0), 0.0, _pw_mm - 2.0, 58.0))
+        title_rect_est = [max(0.0, _pw_mm - 182.0), 0.0, _pw_mm - 2.0, 58.0]
         emit({'stage': 'title_reserved',
-              'rectMm': [round(v, 1) for v in reserved_for_layout[0]]})
+              'rectMm': [round(v, 1) for v in title_rect_est],
+              'note': '估算值；AutoCAD 段会改用实测 DSH_TITLE 包围盒'})
     except Exception as exc:
         emit({'stage': 'title_reserved', 'error': str(exc)})
 
@@ -3097,6 +3101,34 @@ def build(payload):
         except Exception as exc:
             emit({'stage': 'model_closed', 'error': str(exc)})
 
+    # ★ 分阶段执行：stopAfter 让流程在指定阶段停下来，便于人工检查/逐步调试 ★
+    #   'export' → 只做到「SolidWorks 出图元 + 导出 DWG」就停，不碰 AutoCAD，
+    #              并把视图包围框一起返回，等人工确认后再走下一步。
+    # 这样调排版/分图层时不用每次把标注全跑一遍。
+    if str(payload.get('stopAfter') or '').lower() in ('export', 'dwg', 'solidworks'):
+        emit({'stage': 'stopped', 'at': 'export',
+              'dwg': out_dwg, 'dxf': out_dxf, 'drawing': out_drw,
+              'viewBoxes': view_boxes})
+        return {
+            'ok': bool(saved.get('dwg')),
+            'stopped': True,
+            'stopAfter': 'export',
+            'modelInfo': model_info,
+            'isAssembly': is_assembly,
+            'model': model,
+            'drawing': out_drw,
+            'dxf': out_dxf,
+            'dwg': out_dwg,
+            'views': made,
+            'viewBoxes': view_boxes,
+            'bomBoxMm': bom_box_mm,
+            'reservedRects': reserved_for_layout,
+            'titleRectEstimate': title_rect_est,
+            'paper': paper,
+            'landscape': landscape,
+            'saved': saved,
+        }
+
     # ===== 第二步：在 AutoCAD 里做标注（新路线，比 SolidWorks 自动标注可控）=====
     # 理由：SolidWorks 的 InsertModelAnnotations3 只能插模型里本来就有的草图尺寸，
     # 导入实体一个都插不出；而且位置/样式由模板决定，不好精细控制。
@@ -3125,6 +3157,10 @@ def build(payload):
             # 明细表/标题栏占的区域：交给 AutoCAD 布局时避开
             if reserved_for_layout:
                 opts.setdefault('reservedRects', reserved_for_layout)
+            # 标题栏**估算**框：AutoCAD 段分完图层后会实测 DSH_TITLE 的真实
+            # 包围盒，优先用实测值；拿不到才回退到这个估算值。
+            if title_rect_est:
+                opts.setdefault('titleRectEstimate', title_rect_est)
             # 明细表外包围框：AutoCAD 用它把表格图元划到 DSH_BOM 独立图层
             if bom_box_mm:
                 opts.setdefault('bomBoxMm', bom_box_mm)
