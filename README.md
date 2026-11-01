@@ -8,6 +8,26 @@ SolidWorks 模型 → GB 国标工程图 → DXF/DWG，全自动。
 
 ## 更新日志
 
+### v0.15.1（当前）
+
+**清理 AutoCAD 的 `saveNNNN.tmp` 残留。**
+
+AutoCAD 通过 COM 执行 `doc.Save()` 时会在同目录生成 `save<数字>.tmp`，
+实测每个出图目录里都躺着一个（33~77 KB），用户翻目录时容易混淆。
+
+现在 `dimension_dwg` 收尾会自动清理本目录下匹配 `save\d+\.tmp` 的文件：
+
+```python
+for _f in os.listdir(_dir):
+    if _re.fullmatch(r'save\d+\.tmp', _f, _re.IGNORECASE):
+        os.remove(...)
+```
+
+只删**自己输出目录**里、名字严格匹配 `save<数字>.tmp` 的，不会误删用户的文件。
+
+已一次性清掉历史遗留的 19 个。
+
+### v0.15.0
 ### v0.15.0（当前）
 
 **标注大修：4 视图全标 + 直角不标 + 跨视图去重 + 窄视图精简。**
