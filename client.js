@@ -585,33 +585,38 @@ function Field(props) {
         return cmd
       }, [pickedPath, file, form, set])
 
-      /* 一键交给 AI：生成指令 → 直接提交给当前会话 → AI 自己调工具出图。
-         用户要求「生成指令自动去做，不用我来点」。 */
+      /* 一键交给 AI：生成指令 → 交给**宿主**投递到当前会话 → AI 自己调工具出图。
+         为什么走 HTTP 而不是 ctx.conversation：
+           本面板注册在 root 作用域，没有会话绑定，客户端直接调会报
+           "conversation.send requires a session scope"（用户实际碰到过）。
+           宿主侧有 sessions 服务，能定位活动会话，所以由它来投递。 */
       const dispatchToAgent = useCallback(async () => {
         const cmd = buildCommand()
-        if (!conversationService || typeof conversationService.send !== 'function') {
-          setLog(
-            '当前会话不支持自动发送（conversation 服务不可用）。\n' +
-            '指令已生成并复制，请手动粘贴到对话框发送。'
-          )
-          try {
-            navigator?.clipboard?.writeText(cmd)
-          } catch {
-            /* 忽略 */
-          }
-          return
-        }
         try {
           setBusy(true)
           setLog('已把出图指令发给本鱼，正在调用插件工具，请稍候…\n')
-          await conversationService.send(cmd)
-          setLog('指令已提交 ✓ 本鱼会在对话里接着执行，进度看上面的对话区。')
+          const res = await fetch(API + '/api/send-to-agent', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: cmd })
+          })
+          const json = await res.json()
+          if (json?.ok) {
+            setLog('指令已投递 ✓（会话 ' + (json.sessionId || '当前') + '）本鱼会接着执行，进度看对话区。')
+          } else {
+            setLog('投递失败：' + (json?.error || res.status) + '\n指令已生成，可手动粘贴。')
+            try {
+              navigator?.clipboard?.writeText(cmd)
+            } catch {
+              /* 忽略 */
+            }
+          }
         } catch (e) {
-          setLog('自动发送失败：' + (e?.message || e) + '\n指令已生成，可手动粘贴。')
+          setLog('投递失败：' + (e?.message || e) + '\n指令已生成，可手动粘贴。')
         } finally {
           setBusy(false)
         }
-      }, [buildCommand, setLog])
+      }, [buildCommand])
 
       /* 打开面板就自动探测一次启动路径（只做一次，不打扰日志） */
       const autoDetectRef = useRef(false)
@@ -1191,18 +1196,9 @@ function Field(props) {
       )
     }
 
-    /* DSH 客户端的会话发送服务。
-       `ctx.conversation.send(text)` 会把 text 当作一条用户消息提交给当前会话，
-       AI 收到后会自己去调插件工具 —— 这就是「插件自动调用 AI」的入口。
-       （源码里就是 scopedSession('send').prompt([{type:'text',text}], 'queue')） */
-    let conversationService = null
-
     return {
-      inject: ['slots', 'conversation'],
+      inject: ['slots'],
       apply(ctx) {
-        // 抓住会话发送服务，面板里的「交给 AI 出图」用它提交指令
-        conversationService = ctx.conversation || null
-
         // 侧边栏图标
         ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
